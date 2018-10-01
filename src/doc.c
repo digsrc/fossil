@@ -37,11 +37,6 @@ const char *mimetype_from_content(Blob *pBlob){
   int n;
   const unsigned char *x;
 
-  static const char isBinary[256] = {
-     1, 1, 1, 1,  1, 1, 1, 1,    1, 0, 0, 0,  0, 0, 1, 1,
-     1, 1, 1, 1,  1, 1, 1, 1,    1, 1, 0, 0,  1, 1, 1, 1
-  };
-
   /* A table of mimetypes based on file content prefixes
   */
   static const struct {
@@ -56,18 +51,12 @@ const char *mimetype_from_content(Blob *pBlob){
     { "\377\330\377",            3, "image/jpeg" },
   };
 
-  x = (const unsigned char*)blob_buffer(pBlob);
-  n = blob_size(pBlob);
-  for(i=0; i<n; i++){
-    unsigned char c = x[i];
-    if( isBinary[c] ){
-      break;
-    }
-  }
-  if( i>=n ){
+  if( !looks_like_binary(pBlob) ) {
     return 0;   /* Plain text */
   }
-  for(i=0; i<ArraySize(aMime); i++){
+  x = (const unsigned char*)blob_buffer(pBlob);
+  n = blob_size(pBlob);
+  for(i=0; i<count(aMime); i++){
     if( n>=aMime[i].size && memcmp(x, aMime[i].zPrefix, aMime[i].size)==0 ){
       return aMime[i].zMimetype;
     }
@@ -97,6 +86,9 @@ static const struct {
   { "bat",        3, "application/x-msdos-program"       },
   { "bcpio",      5, "application/x-bcpio"               },
   { "bin",        3, "application/octet-stream"          },
+  { "bmp",        3, "image/bmp"                         },
+  { "bz2",        3, "application/x-bzip2"               },
+  { "bzip",       4, "application/x-bzip"                },
   { "c",          1, "text/plain"                        },
   { "cc",         2, "text/plain"                        },
   { "ccad",       4, "application/clariscad"             },
@@ -106,11 +98,13 @@ static const struct {
   { "com",        3, "application/x-msdos-program"       },
   { "cpio",       4, "application/x-cpio"                },
   { "cpt",        3, "application/mac-compactpro"        },
+  { "cs",         2, "text/plain"                        },
   { "csh",        3, "application/x-csh"                 },
   { "css",        3, "text/css"                          },
   { "csv",        3, "text/csv"                          },
   { "dcr",        3, "application/x-director"            },
   { "deb",        3, "application/x-debian-package"      },
+  { "dib",        3, "image/bmp"                         },
   { "dir",        3, "application/x-director"            },
   { "dl",         2, "video/dl"                          },
   { "dms",        3, "application/octet-stream"          },
@@ -144,6 +138,7 @@ static const struct {
   { "htm",        3, "text/html"                         },
   { "html",       4, "text/html"                         },
   { "ice",        3, "x-conference/x-cooltalk"           },
+  { "ico",        3, "image/vnd.microsoft.icon"          },
   { "ief",        3, "image/ief"                         },
   { "iges",       4, "model/iges"                        },
   { "igs",        3, "model/iges"                        },
@@ -268,6 +263,7 @@ static const struct {
   { "txt",        3, "text/plain"                        },
   { "unv",        3, "application/i-deas"                },
   { "ustar",      5, "application/x-ustar"               },
+  { "vb",         2, "text/plain"                        },
   { "vcd",        3, "application/x-cdlink"              },
   { "vda",        3, "application/vda"                   },
   { "viv",        3, "video/vnd.vivo"                    },
@@ -302,7 +298,7 @@ static const struct {
 */
 static void mimetype_verify(void){
   int i;
-  for(i=1; i<ArraySize(aMime); i++){
+  for(i=1; i<count(aMime); i++){
     if( fossil_strcmp(aMime[i-1].zSuffix,aMime[i].zSuffix)>=0 ){
       fossil_fatal("mimetypes out of sequence: %s before %s",
                    aMime[i-1].zSuffix, aMime[i].zSuffix);
@@ -340,7 +336,7 @@ const char *mimetype_from_name(const char *zName){
     sqlite3_snprintf(sizeof(zSuffix), zSuffix, "%s", z);
     for(i=0; zSuffix[i]; i++) zSuffix[i] = fossil_tolower(zSuffix[i]);
     first = 0;
-    last = ArraySize(aMime) - 1;
+    last = count(aMime) - 1;
     while( first<=last ){
       int c;
       i = (first+last)/2;
@@ -357,7 +353,7 @@ const char *mimetype_from_name(const char *zName){
 }
 
 /*
-** COMMAND:  test-mimetype
+** COMMAND: test-mimetype
 **
 ** Usage: %fossil test-mimetype FILENAME...
 **
@@ -388,16 +384,17 @@ void mimetype_list_page(void){
   @ <p>The Fossil <a href="%R/help?cmd=/doc">/doc</a> page uses filename
   @ suffixes and the following table to guess at the appropriate mimetype
   @ for each document.</p>
-  @ <table id='mimeTable' border=1 cellpadding=0 class='mimetypetable'>
+  @ <table class='sortable mimetypetable' border=1 cellpadding=0 \
+  @ data-column-types='tt' data-init-sort='1'>
   @ <thead>
   @ <tr><th>Suffix<th>Mimetype
   @ </thead>
   @ <tbody>
-  for(i=0; i<ArraySize(aMime); i++){
+  for(i=0; i<count(aMime); i++){
     @ <tr><td>%h(aMime[i].zSuffix)<td>%h(aMime[i].zMimetype)</tr>
   }
   @ </tbody></table>
-  output_table_sorting_javascript("mimeTable","tt",1);
+  style_table_sorter();
   style_footer();
 }
 
@@ -470,15 +467,16 @@ int doc_is_embedded_html(Blob *pContent, Blob *pTitle){
 ** if the file is not found or could not be loaded.
 */
 int doc_load_content(int vid, const char *zName, Blob *pContent){
+  int writable = db_is_writeable("repository");
   int rid;   /* The RID of the file being loaded */
-  if( !db_table_exists("repository","vcache") ){
+  if( !db_table_exists("repository", "vcache") || !writable ){
     db_multi_exec(
-      "CREATE TABLE IF NOT EXISTS vcache(\n"
+      "CREATE %s TABLE IF NOT EXISTS vcache(\n"
       "  vid INTEGER,         -- check-in ID\n"
       "  fname TEXT,          -- filename\n"
       "  rid INTEGER,         -- artifact ID\n"
       "  PRIMARY KEY(vid,fname)\n"
-      ") WITHOUT ROWID"
+      ") WITHOUT ROWID", writable ? "" : "TEMPORARY"
     );
   }
   if( !db_exists("SELECT 1 FROM vcache WHERE vid=%d", vid) ){
@@ -501,11 +499,42 @@ int doc_load_content(int vid, const char *zName, Blob *pContent){
 }
 
 /*
+** Transfer content to the output.  During the transfer, when text of
+** the following form is seen:
+**
+**       href="$ROOT/
+**       action="$ROOT/
+**
+** Convert $ROOT to the root URI of the repository.  Allow ' in place of "
+** and any case for href or action.
+*/
+static void convert_href_and_output(Blob *pIn){
+  int i, base;
+  int n = blob_size(pIn);
+  char *z = blob_buffer(pIn);
+  for(base=0, i=7; i<n; i++){
+    if( z[i]=='$'
+     && strncmp(&z[i],"$ROOT/", 6)==0
+     && (z[i-1]=='\'' || z[i-1]=='"')
+     && i-base>=9
+     && (fossil_strnicmp(&z[i-7]," href=", 6)==0 ||
+           fossil_strnicmp(&z[i-9]," action=", 8)==0)
+    ){
+      blob_append(cgi_output_blob(), &z[base], i-base);
+      blob_appendf(cgi_output_blob(), "%R");
+      base = i+5;
+    }
+  }
+  blob_append(cgi_output_blob(), &z[base], i-base);
+}
+
+/*
+** WEBPAGE: uv
 ** WEBPAGE: doc
-** URL: /doc?name=CHECKIN/FILE
+** URL: /uv/FILE
 ** URL: /doc/CHECKIN/FILE
 **
-** CHECKIN can be either tag or SHA1 hash or timestamp identifying a
+** CHECKIN can be either tag or hash prefix or timestamp identifying a
 ** particular check, or the name of a branch (meaning the most recent
 ** check-in on that branch) or one of various magic words:
 **
@@ -531,18 +560,35 @@ int doc_load_content(int vid, const char *zName, Blob *pContent){
 ** enabled, the name "FILE/index.th1" is also tried.  If none of those are
 ** found, then FILE is completely replaced by "404.md" and tried.  If that
 ** is not found, then a default 404 screen is generated.
+**
+** If the file's mimetype is "text/x-fossil-wiki" or "text/x-markdown"
+** then headers and footers are added. If the document has mimetype
+** text/html then headers and footers are usually not added.  However,
+** if a "text/html" document begins with the following div:
+**
+**       <div class='fossil-doc' data-title='TEXT'>
+**
+** then headers and footers are supplied.  The optional data-title field
+** specifies the title of the document in that case.
+**
+** For fossil-doc documents and for markdown documents, text of the
+** form:  "href='$ROOT/" or "action='$ROOT" has the $ROOT name expanded
+** to the top-level of the repository.
 */
 void doc_page(void){
-  const char *zName;                /* Argument to the /doc page */
+  const char *zName = 0;            /* Argument to the /doc page */
   const char *zOrigName = "?";      /* Original document name */
   const char *zMime;                /* Document MIME type */
   char *zCheckin = "tip";           /* The check-in holding the document */
+  char *zPathSuffix = "";           /* Text to append to g.zPath */
   int vid = 0;                      /* Artifact of check-in */
   int rid = 0;                      /* Artifact of file */
   int i;                            /* Loop counter */
   Blob filebody;                    /* Content of the documentation file */
   Blob title;                       /* Document title */
   int nMiss = (-1);                 /* Failed attempts to find the document */
+  int isUV = g.zPath[0]=='u';       /* True for /uv.  False for /doc */
+  const char *zDfltTitle;
   static const char *const azSuffix[] = {
      "index.html", "index.wiki", "index.md"
 #ifdef FOSSIL_ENABLE_TH1_DOCS
@@ -553,29 +599,39 @@ void doc_page(void){
   login_check_credentials();
   if( !g.perm.Read ){ login_needed(g.anon.Read); return; }
   blob_init(&title, 0, 0);
+  zDfltTitle = isUV ? "" : "Documentation";
   db_begin_transaction();
-  while( rid==0 && (++nMiss)<=ArraySize(azSuffix) ){
+  while( rid==0 && (++nMiss)<=count(azSuffix) ){
     zName = P("name");
-    if( zName==0 || zName[0]==0 ) zName = "tip/index.wiki";
-    for(i=0; zName[i] && zName[i]!='/'; i++){}
-    zCheckin = mprintf("%.*s", i, zName);
-    if( fossil_strcmp(zCheckin,"ckout")==0 && g.localOpen==0 ){
-      zCheckin = "tip";
+    if( isUV ){
+      if( zName==0 ) zName = "index.wiki";
+      i = 0;
+    }else{
+      if( zName==0 || zName[0]==0 ) zName = "tip/index.wiki";
+      for(i=0; zName[i] && zName[i]!='/'; i++){}
+      zCheckin = mprintf("%.*s", i, zName);
+      if( fossil_strcmp(zCheckin,"ckout")==0 && g.localOpen==0 ){
+        zCheckin = "tip";
+      }
     }
-    if( nMiss==ArraySize(azSuffix) ){
+    if( nMiss==count(azSuffix) ){
       zName = "404.md";
     }else if( zName[i]==0 ){
-      assert( nMiss>=0 && nMiss<ArraySize(azSuffix) );
+      assert( nMiss>=0 && nMiss<count(azSuffix) );
       zName = azSuffix[nMiss];
-    }else{
+    }else if( !isUV ){
       zName += i;
     }
     while( zName[0]=='/' ){ zName++; }
-    g.zPath = mprintf("%s/%s/%s", g.zPath, zCheckin, zName);
+    if( isUV ){
+      zPathSuffix = fossil_strdup(zName);
+    }else{
+      zPathSuffix = mprintf("%s/%s", zCheckin, zName);
+    }
     if( nMiss==0 ) zOrigName = zName;
     if( !file_is_simple_pathname(zName, 1) ){
       if( sqlite3_strglob("*/", zName)==0 ){
-        assert( nMiss>=0 && nMiss<ArraySize(azSuffix) );
+        assert( nMiss>=0 && nMiss<count(azSuffix) );
         zName = mprintf("%s%s", zName, azSuffix[nMiss]);
         if( !file_is_simple_pathname(zName, 1) ){
           goto doc_not_found;
@@ -584,13 +640,28 @@ void doc_page(void){
         goto doc_not_found;
       }
     }
-    if( fossil_strcmp(zCheckin,"ckout")==0 ){
+    if( isUV ){
+      if( db_table_exists("repository","unversioned") ){
+        Stmt q;
+        db_prepare(&q, "SELECT hash, mtime FROM unversioned"
+                       " WHERE name=%Q", zName);
+        if( db_step(&q)==SQLITE_ROW ){
+          etag_check(ETAG_HASH, db_column_text(&q,0));
+          etag_last_modified(db_column_int64(&q,1));
+        }
+        db_finalize(&q);
+        if( unversioned_content(zName, &filebody)==0 ){
+          rid = 1;
+          zDfltTitle = zName;
+        }
+      }
+    }else if( fossil_strcmp(zCheckin,"ckout")==0 ){
       /* Read from the local checkout */
       char *zFullpath;
       db_must_be_within_tree();
       zFullpath = mprintf("%s/%s", g.zLocalRoot, zName);
-      if( file_isfile(zFullpath)
-       && blob_read_from_file(&filebody, zFullpath)>0 ){
+      if( file_isfile(zFullpath, RepoFILE)
+       && blob_read_from_file(&filebody, zFullpath, RepoFILE)>0 ){
         rid = 1;  /* Fake RID just to get the loop to end */
       }
       fossil_free(zFullpath);
@@ -599,6 +670,7 @@ void doc_page(void){
       rid = doc_load_content(vid, zName, &filebody);
     }
   }
+  g.zPath = mprintf("%s/%s", g.zPath, zPathSuffix);
   if( rid==0 ) goto doc_not_found;
   blob_to_utf8_no_bom(&filebody, 0);
 
@@ -610,10 +682,12 @@ void doc_page(void){
     zMime = mimetype_from_name(zName);
   }
   Th_Store("doc_name", zName);
-  Th_Store("doc_version", db_text(0, "SELECT '[' || substr(uuid,1,10) || ']'"
-                                     "  FROM blob WHERE rid=%d", vid));
-  Th_Store("doc_date", db_text(0, "SELECT datetime(mtime) FROM event"
-                                  " WHERE objid=%d AND type='ci'", vid));
+  if( vid ){
+    Th_Store("doc_version", db_text(0, "SELECT '[' || substr(uuid,1,10) || ']'"
+                                       "  FROM blob WHERE rid=%d", vid));
+    Th_Store("doc_date", db_text(0, "SELECT datetime(mtime) FROM event"
+                                    " WHERE objid=%d AND type='ci'", vid));
+  }
   if( fossil_strcmp(zMime, "text/x-fossil-wiki")==0 ){
     Blob tail;
     style_adunit_config(ADUNIT_RIGHT_OK);
@@ -621,7 +695,7 @@ void doc_page(void){
       style_header("%s", blob_str(&title));
       wiki_convert(&tail, 0, WIKI_BUTTONS);
     }else{
-      style_header("Documentation");
+      style_header("%s", zDfltTitle);
       wiki_convert(&filebody, 0, WIKI_BUTTONS);
     }
     style_footer();
@@ -631,13 +705,13 @@ void doc_page(void){
     if( blob_size(&title)>0 ){
       style_header("%s", blob_str(&title));
     }else{
-      style_header("%s", nMiss>=ArraySize(azSuffix)?
-                        "Not Found" : "Documentation");
+      style_header("%s", nMiss>=count(azSuffix)?
+                        "Not Found" : zDfltTitle);
     }
-    blob_append(cgi_output_blob(), blob_buffer(&tail), blob_size(&tail));
+    convert_href_and_output(&tail);
     style_footer();
   }else if( fossil_strcmp(zMime, "text/plain")==0 ){
-    style_header("Documentation");
+    style_header("%s", zDfltTitle);
     @ <blockquote><pre>
     @ %h(blob_str(&filebody))
     @ </pre></blockquote>
@@ -646,26 +720,45 @@ void doc_page(void){
             && doc_is_embedded_html(&filebody, &title) ){
     if( blob_size(&title)==0 ) blob_append(&title,zName,-1);
     style_header("%s", blob_str(&title));
-    blob_append(cgi_output_blob(), blob_buffer(&filebody),blob_size(&filebody));
+    convert_href_and_output(&filebody);
     style_footer();
 #ifdef FOSSIL_ENABLE_TH1_DOCS
   }else if( Th_AreDocsEnabled() &&
             fossil_strcmp(zMime, "application/x-th1")==0 ){
-    style_header("%h", zName);
-    Th_Render(blob_str(&filebody));
-    style_footer();
+    int raw = P("raw")!=0;
+    if( !raw ){
+      Blob tail;
+      blob_zero(&tail);
+      if( wiki_find_title(&filebody, &title, &tail) ){
+        style_header("%s", blob_str(&title));
+        Th_Render(blob_str(&tail));
+        blob_reset(&tail);
+      }else{
+        style_header("%h", zName);
+        Th_Render(blob_str(&filebody));
+      }
+    }else{
+      Th_Render(blob_str(&filebody));
+    }
+    if( !raw ){
+      style_footer();
+    }
 #endif
   }else{
     cgi_set_content_type(zMime);
     cgi_set_content(&filebody);
   }
-  if( nMiss>=ArraySize(azSuffix) ) cgi_set_status(404, "Not Found");
+  if( nMiss>=count(azSuffix) ) cgi_set_status(404, "Not Found");
   db_end_transaction(0);
   return;
 
   /* Jump here when unable to locate the document */
 doc_not_found:
   db_end_transaction(0);
+  if( isUV && P("name")==0 ){
+    uvlist_page();
+    return;
+  }
   cgi_set_status(404, "Not Found");
   style_header("Not Found");
   @ <p>Document %h(zOrigName) not found
@@ -756,6 +849,7 @@ void logo_page(void){
   Blob logo;
   char *zMime;
 
+  etag_check(ETAG_CONFIG, 0);
   zMime = db_get("logo-mimetype", "image/gif");
   blob_zero(&logo);
   db_blob(&logo, "SELECT value FROM config WHERE name='logo-image'");
@@ -764,7 +858,6 @@ void logo_page(void){
   }
   cgi_set_content_type(zMime);
   cgi_set_content(&logo);
-  g.isConst = 1;
 }
 
 /*
@@ -790,6 +883,7 @@ void background_page(void){
   Blob bgimg;
   char *zMime;
 
+  etag_check(ETAG_CONFIG, 0);
   zMime = db_get("background-mimetype", "image/gif");
   blob_zero(&bgimg);
   db_blob(&bgimg, "SELECT value FROM config WHERE name='background-image'");
@@ -798,7 +892,6 @@ void background_page(void){
   }
   cgi_set_content_type(zMime);
   cgi_set_content(&bgimg);
-  g.isConst = 1;
 }
 
 

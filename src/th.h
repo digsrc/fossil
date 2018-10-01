@@ -52,6 +52,7 @@ int Th_Expr(Th_Interp *interp, const char *, int);
 ** begins with "::", the lookup is in the top level (global) frame.
 */
 int Th_ExistsVar(Th_Interp *, const char *, int);
+int Th_ExistsArrayVar(Th_Interp *, const char *, int);
 int Th_GetVar(Th_Interp *, const char *, int);
 int Th_SetVar(Th_Interp *, const char *, int, const char *, int);
 int Th_LinkVar(Th_Interp *, const char *, int, int, const char *, int);
@@ -103,6 +104,7 @@ int Th_InFrame(Th_Interp *interp,
 #define TH_BREAK    2
 #define TH_RETURN   3
 #define TH_CONTINUE 4
+#define TH_RETURN2  5
 
 /*
 ** Set and get the interpreter result.
@@ -145,6 +147,7 @@ int Th_SetResultDouble(Th_Interp *, double);
 */
 int Th_ListAppendCommands(Th_Interp *, char **, int *);
 int Th_ListAppendVariables(Th_Interp *, char **, int *);
+int Th_ListAppendArray(Th_Interp *, const char *, int, char **, int *);
 
 /*
 ** Drop in replacements for the corresponding standard library functions.

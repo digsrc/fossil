@@ -435,6 +435,9 @@ static int proc_call1(
   if( rc==TH_RETURN ){
     rc = TH_OK;
   }
+  if( rc==TH_RETURN2 ){
+    rc = TH_RETURN;
+  }
   return rc;
 }
 
@@ -497,9 +500,11 @@ static int proc_command(
   ** ProcDefn.hasArgs flag. The "args" parameter does not require an
   ** entry in the ProcDefn.azParam[] or ProcDefn.azDefault[] arrays.
   */
-  if( anParam[nParam-1]==4 && 0==memcmp(azParam[nParam-1], "args", 4) ){
-    p->hasArgs = 1;
-    nParam--;
+  if( nParam>0 ){
+    if( anParam[nParam-1]==4 && 0==memcmp(azParam[nParam-1], "args", 4) ){
+      p->hasArgs = 1;
+      nParam--;
+    }
   }
 
   p->nParam    = nParam;
@@ -714,6 +719,35 @@ static int string_first_command(
   }
 
   return Th_SetResultInt(interp, iRes);
+}
+
+/*
+** TH Syntax:
+**
+**   string index STRING INDEX
+*/
+static int string_index_command(
+  Th_Interp *interp, void *ctx, int argc, const char **argv, int *argl
+){
+  int iIndex;
+
+  if( argc!=4 ){
+    return Th_WrongNumArgs(interp, "string index string index");
+  }
+
+  if( argl[3]==3 && 0==memcmp("end", argv[3], 3) ){
+    iIndex = argl[2]-1;
+  }else if( Th_ToInt(interp, argv[3], argl[3], &iIndex) ){
+    Th_ErrorMessage(
+        interp, "Expected \"end\" or integer, got:", argv[3], argl[3]);
+    return TH_ERROR;
+  }
+
+  if( iIndex>=0 && iIndex<argl[2] ){
+    return Th_SetResult(interp, &argv[2][iIndex], 1);
+  }else{
+    return Th_SetResult(interp, 0, 0);
+  }
 }
 
 /*
@@ -972,7 +1006,49 @@ static int info_vars_command(
 /*
 ** TH Syntax:
 **
-**   unset VAR
+**   array exists VARNAME
+*/
+static int array_exists_command(
+  Th_Interp *interp, void *ctx, int argc, const char **argv, int *argl
+){
+  int rc;
+
+  if( argc!=3 ){
+    return Th_WrongNumArgs(interp, "array exists var");
+  }
+  rc = Th_ExistsArrayVar(interp, argv[2], argl[2]);
+  Th_SetResultInt(interp, rc);
+  return TH_OK;
+}
+
+/*
+** TH Syntax:
+**
+**   array names VARNAME
+*/
+static int array_names_command(
+  Th_Interp *interp, void *ctx, int argc, const char **argv, int *argl
+){
+  int rc;
+  char *zElem = 0;
+  int nElem = 0;
+
+  if( argc!=3 ){
+    return Th_WrongNumArgs(interp, "array names varname");
+  }
+  rc = Th_ListAppendArray(interp, argv[2], argl[2], &zElem, &nElem);
+  if( rc!=TH_OK ){
+    return rc;
+  }
+  Th_SetResult(interp, zElem, nElem);
+  if( zElem ) Th_Free(interp, zElem);
+  return TH_OK;
+}
+
+/*
+** TH Syntax:
+**
+**   unset VARNAME
 */
 static int unset_command(
   Th_Interp *interp,
@@ -1015,13 +1091,17 @@ int Th_CallSubCommand(
 /*
 ** TH Syntax:
 **
-**   string compare STR1 STR2
-**   string first   NEEDLE HAYSTACK ?STARTINDEX?
-**   string is      CLASS STRING
-**   string last    NEEDLE HAYSTACK ?STARTINDEX?
-**   string length  STRING
-**   string range   STRING FIRST LAST
-**   string repeat  STRING COUNT
+**   string compare   STR1 STR2
+**   string first     NEEDLE HAYSTACK ?STARTINDEX?
+**   string index     STRING INDEX
+**   string is        CLASS STRING
+**   string last      NEEDLE HAYSTACK ?STARTINDEX?
+**   string length    STRING
+**   string range     STRING FIRST LAST
+**   string repeat    STRING COUNT
+**   string trim      STRING
+**   string trimleft  STRING
+**   string trimright STRING
 */
 static int string_command(
   Th_Interp *interp,
@@ -1031,13 +1111,14 @@ static int string_command(
   int *argl
 ){
   static const Th_SubCommand aSub[] = {
-    { "compare", string_compare_command },
-    { "first",   string_first_command },
-    { "is",      string_is_command },
-    { "last",    string_last_command },
-    { "length",  string_length_command },
-    { "range",   string_range_command },
-    { "repeat",  string_repeat_command },
+    { "compare",   string_compare_command },
+    { "first",     string_first_command },
+    { "index",     string_index_command },
+    { "is",        string_is_command },
+    { "last",      string_last_command },
+    { "length",    string_length_command },
+    { "range",     string_range_command },
+    { "repeat",    string_repeat_command },
     { "trim",      string_trim_command },
     { "trimleft",  string_trim_command },
     { "trimright", string_trim_command },
@@ -1064,6 +1145,27 @@ static int info_command(
     { "commands", info_commands_command },
     { "exists",   info_exists_command },
     { "vars",     info_vars_command },
+    { 0, 0 }
+  };
+  return Th_CallSubCommand(interp, ctx, argc, argv, argl, aSub);
+}
+
+/*
+** TH Syntax:
+**
+**   array exists VARNAME
+**   array names VARNAME
+*/
+static int array_command(
+  Th_Interp *interp,
+  void *ctx,
+  int argc,
+  const char **argv,
+  int *argl
+){
+  static const Th_SubCommand aSub[] = {
+    { "exists", array_exists_command },
+    { "names",  array_names_command },
     { 0, 0 }
   };
   return Th_CallSubCommand(interp, ctx, argc, argv, argl, aSub);
@@ -1182,6 +1284,7 @@ int th_register_language(Th_Interp *interp){
     Th_CommandProc xProc;
     void *pContext;
   } aCommand[] = {
+    {"array",    array_command,   0},
     {"catch",    catch_command,   0},
     {"expr",     expr_command,    0},
     {"for",      for_command,     0},

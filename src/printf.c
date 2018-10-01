@@ -26,7 +26,7 @@
 #endif
 #include <time.h>
 
-/* Two custom conversions are used to show a prefix of SHA1 hashes:
+/* Two custom conversions are used to show a prefix of artifact hashes:
 **
 **      %!S       Prefix of a length appropriate for URLs
 **      %S        Prefix of a length appropriate for human display
@@ -46,7 +46,7 @@
 #endif
 
 /*
-** Return the number of SHA1 hash digits to display.  The number is for
+** Return the number of artifact hash digits to display.  The number is for
 ** human output if the bForUrl is false and is destined for a URL if
 ** bForUrl is false.
 */
@@ -62,6 +62,13 @@ static int hashDigits(int bForUrl){
     if( nDigitUrl > 40 ) nDigitUrl = 40;
   }
   return bForUrl ? nDigitUrl : nDigitHuman;
+}
+
+/*
+** Return the number of characters in a %S output.
+*/
+int length_of_S_display(void){
+  return hashDigits(0);
 }
 
 /*
@@ -160,7 +167,7 @@ static const et_info fmtinfo[] = {
   {  'p', 16, 0, etPOINTER,    0,  1 },
   {  '/',  0, 0, etPATH,       0,  0 },
 };
-#define etNINFO  (sizeof(fmtinfo)/sizeof(fmtinfo[0]))
+#define etNINFO count(fmtinfo)
 
 /*
 ** "*val" is a double such that 0.1 <= *val < 10.0
@@ -234,15 +241,7 @@ static int wiki_convert_flags(int altForm2){
 ** The root program.  All variations call this core.
 **
 ** INPUTS:
-**   func   This is a pointer to a function taking three arguments
-**            1. A pointer to anything.  Same as the "arg" parameter.
-**            2. A pointer to the list of characters to be output
-**               (Note, this list is NOT null terminated.)
-**            3. An integer number of characters to be output.
-**               (Note: This number might be zero.)
-**
-**   arg    This is the pointer to anything which will be passed as the
-**          first argument to "func".  Use it for whatever you like.
+**   pBlob  This is the blob where the output will be built.
 **
 **   fmt    This is the format string, as in the usual print.
 **
@@ -278,6 +277,7 @@ int vxprintf(
   etByte flag_long;          /* True if "l" flag is present */
   etByte flag_longlong;      /* True if the "ll" flag is present */
   etByte done;               /* Loop termination flag */
+  etByte cThousand;          /* Thousands separator for %d and %u */
   u64 longvalue;             /* Value for integer types */
   long double realvalue;     /* Value for real types */
   const et_info *infop;      /* Pointer to the appropriate info structure */
@@ -315,7 +315,7 @@ int vxprintf(
       break;
     }
     /* Find out what flags are present */
-    flag_leftjustify = flag_plussign = flag_blanksign =
+    flag_leftjustify = flag_plussign = flag_blanksign = cThousand =
      flag_alternateform = flag_altform2 = flag_zeropad = 0;
     done = 0;
     do{
@@ -326,6 +326,7 @@ int vxprintf(
         case '#':   flag_alternateform = 1;   break;
         case '!':   flag_altform2 = 1;        break;
         case '0':   flag_zeropad = 1;         break;
+        case ',':   cThousand = ',';          break;
         default:    done = 1;                 break;
       }
     }while( !done && (c=(*++fmt))!=0 );
@@ -457,8 +458,23 @@ int vxprintf(
           }while( longvalue>0 );
         }
         length = &buf[etBUFSIZE-1]-bufpt;
-        for(idx=precision-length; idx>0; idx--){
+        while( precision>length ){
           *(--bufpt) = '0';                             /* Zero pad */
+          length++;
+        }
+        if( cThousand ){
+          int nn = (length - 1)/3;  /* Number of "," to insert */
+          int ix = (length - 1)%3 + 1;
+          bufpt -= nn;
+          for(idx=0; nn>0; idx++){
+            bufpt[idx] = bufpt[idx+nn];
+            ix--;
+            if( ix==0 ){
+              bufpt[++idx] = cThousand;
+              nn--;
+              ix = 3;
+            }
+          }
         }
         if( prefix ) *(--bufpt) = prefix;               /* Add sign */
         if( flag_alternateform && infop->prefix ){      /* Add "0" or "0x" */
@@ -660,7 +676,7 @@ int vxprintf(
         }else if( xtype==etDYNSTRING ){
           zExtra = bufpt;
         }else if( xtype==etSTRINGID ){
-          precision = 	hashDigits(flag_altform2);
+          precision = hashDigits(flag_altform2);
         }
         length = StrNLen32(bufpt, limit);
         if( precision>=0 && precision<length ) length = precision;
@@ -885,20 +901,29 @@ static int stdoutAtBOL = 1;
 **
 ** On windows, transform the output into the current terminal encoding
 ** if the output is going to the screen.  If output is redirected into
-** a file, no translation occurs.  No translation ever occurs on unix.
+** a file, no translation occurs. Switch output mode to binary to
+** properly process line-endings, make sure to switch the mode back to
+** text when done.
+** No translation ever occurs on unix.
 */
 void fossil_puts(const char *z, int toStdErr){
+  FILE* out = (toStdErr ? stderr : stdout);
   int n = (int)strlen(z);
   if( n==0 ) return;
+  assert( toStdErr==0 || toStdErr==1 );
   if( toStdErr==0 ) stdoutAtBOL = (z[n-1]=='\n');
 #if defined(_WIN32)
   if( fossil_utf8_to_console(z, n, toStdErr) >= 0 ){
     return;
   }
+  fflush(out);
+  _setmode(_fileno(out), _O_BINARY);
 #endif
-  assert( toStdErr==0 || toStdErr==1 );
-  fwrite(z, 1, n, toStdErr ? stderr : stdout);
-  fflush(toStdErr ? stderr : stdout);
+  fwrite(z, 1, n, out);
+#if defined(_WIN32)
+  fflush(out);
+  _setmode(_fileno(out), _O_TEXT);
+#endif
 }
 
 /*
@@ -980,11 +1005,11 @@ static void fossil_errorlog(const char *zFormat, ...){
   vfprintf(out, zFormat, ap);
   fprintf(out, "\n");
   va_end(ap);
-  for(i=0; i<sizeof(azEnv)/sizeof(azEnv[0]); i++){
+  for(i=0; i<count(azEnv); i++){
     char *p;
     if( (p = fossil_getenv(azEnv[i]))!=0 ){
       fprintf(out, "%s=%s\n", azEnv[i], p);
-      fossil_filename_free(p);
+      fossil_path_free(p);
     }else if( (z = P(azEnv[i]))!=0 ){
       fprintf(out, "%s=%s\n", azEnv[i], z);
     }
@@ -1125,7 +1150,7 @@ void fossil_warning(const char *zFormat, ...){
   fossil_errorlog("warning: %s", z);
 #ifdef FOSSIL_ENABLE_JSON
   if(g.json.isJsonMode){
-    json_warn( FSL_JSON_W_UNKNOWN, z );
+    json_warn( FSL_JSON_W_UNKNOWN, "%s", z );
   }else
 #endif
   {
@@ -1140,7 +1165,7 @@ void fossil_warning(const char *zFormat, ...){
 }
 
 /*
-** Turn off any NL to CRNL translation on the stream given as an
+** Turn off any LF to CRLF translation on the stream given as an
 ** argument.  This is a no-op on unix but is necessary on windows.
 */
 void fossil_binary_mode(FILE *p){

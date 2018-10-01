@@ -31,19 +31,19 @@ int blob_delta_create(Blob *pOriginal, Blob *pTarget, Blob *pDelta){
   int len;
   char *zRes;
   blob_zero(pDelta);
-  zOrig = blob_buffer(pOriginal);
+  zOrig = blob_materialize(pOriginal);
   lenOrig = blob_size(pOriginal);
-  zTarg = blob_buffer(pTarget);
+  zTarg = blob_materialize(pTarget);
   lenTarg = blob_size(pTarget);
   blob_resize(pDelta, lenTarg+16);
-  zRes = blob_buffer(pDelta);
+  zRes = blob_materialize(pDelta);
   len = delta_create(zOrig, lenOrig, zTarg, lenTarg, zRes);
   blob_resize(pDelta, len);
   return 0;
 }
 
 /*
-** COMMAND:  test-delta-create
+** COMMAND: test-delta-create
 **
 ** Usage: %fossil test-delta-create FILE1 FILE2 DELTA
 **
@@ -55,15 +55,15 @@ void delta_create_cmd(void){
   if( g.argc!=5 ){
     usage("ORIGIN TARGET DELTA");
   }
-  if( blob_read_from_file(&orig, g.argv[2])<0 ){
-    fossil_fatal("cannot read %s\n", g.argv[2]);
+  if( blob_read_from_file(&orig, g.argv[2], ExtFILE)<0 ){
+    fossil_fatal("cannot read %s", g.argv[2]);
   }
-  if( blob_read_from_file(&target, g.argv[3])<0 ){
-    fossil_fatal("cannot read %s\n", g.argv[3]);
+  if( blob_read_from_file(&target, g.argv[3], ExtFILE)<0 ){
+    fossil_fatal("cannot read %s", g.argv[3]);
   }
   blob_delta_create(&orig, &target, &delta);
   if( blob_write_to_file(&delta, g.argv[4])<blob_size(&delta) ){
-    fossil_fatal("cannot write %s\n", g.argv[4]);
+    fossil_fatal("cannot write %s", g.argv[4]);
   }
   blob_reset(&orig);
   blob_reset(&target);
@@ -71,7 +71,7 @@ void delta_create_cmd(void){
 }
 
 /*
-** COMMAND:  test-delta-analyze
+** COMMAND: test-delta-analyze
 **
 ** Usage: %fossil test-delta-analyze FILE1 FILE2
 **
@@ -82,29 +82,31 @@ void delta_analyze_cmd(void){
   Blob orig, target, delta;
   int nCopy = 0;
   int nInsert = 0;
-  int sz1, sz2;
+  int sz1, sz2, sz3;
   if( g.argc!=4 ){
     usage("ORIGIN TARGET");
   }
-  if( blob_read_from_file(&orig, g.argv[2])<0 ){
-    fossil_fatal("cannot read %s\n", g.argv[2]);
+  if( blob_read_from_file(&orig, g.argv[2], ExtFILE)<0 ){
+    fossil_fatal("cannot read %s", g.argv[2]);
   }
-  if( blob_read_from_file(&target, g.argv[3])<0 ){
-    fossil_fatal("cannot read %s\n", g.argv[3]);
+  if( blob_read_from_file(&target, g.argv[3], ExtFILE)<0 ){
+    fossil_fatal("cannot read %s", g.argv[3]);
   }
   blob_delta_create(&orig, &target, &delta);
   delta_analyze(blob_buffer(&delta), blob_size(&delta), &nCopy, &nInsert);
   sz1 = blob_size(&orig);
   sz2 = blob_size(&target);
+  sz3 = blob_size(&delta);
   blob_reset(&orig);
   blob_reset(&target);
   blob_reset(&delta);
   fossil_print("original size:  %8d\n", sz1);
-  fossil_print("bytes copied:   %8d (%.1f%% of target)\n",
+  fossil_print("bytes copied:   %8d (%.2f%% of target)\n",
                nCopy, (100.0*nCopy)/sz2);
-  fossil_print("bytes inserted: %8d (%.1f%% of target)\n",
+  fossil_print("bytes inserted: %8d (%.2f%% of target)\n",
                nInsert, (100.0*nInsert)/sz2);
   fossil_print("final size:     %8d\n", sz2);
+  fossil_print("delta size:     %8d\n", sz3);
 }
 
 /*
@@ -141,7 +143,7 @@ int blob_delta_apply(Blob *pOriginal, Blob *pDelta, Blob *pTarget){
 }
 
 /*
-** COMMAND:  test-delta-apply
+** COMMAND: test-delta-apply
 **
 ** Usage: %fossil test-delta-apply FILE1 DELTA
 **
@@ -152,15 +154,15 @@ void delta_apply_cmd(void){
   if( g.argc!=5 ){
     usage("ORIGIN DELTA TARGET");
   }
-  if( blob_read_from_file(&orig, g.argv[2])<0 ){
-    fossil_fatal("cannot read %s\n", g.argv[2]);
+  if( blob_read_from_file(&orig, g.argv[2], ExtFILE)<0 ){
+    fossil_fatal("cannot read %s", g.argv[2]);
   }
-  if( blob_read_from_file(&delta, g.argv[3])<0 ){
-    fossil_fatal("cannot read %s\n", g.argv[3]);
+  if( blob_read_from_file(&delta, g.argv[3], ExtFILE)<0 ){
+    fossil_fatal("cannot read %s", g.argv[3]);
   }
   blob_delta_apply(&orig, &delta, &target);
   if( blob_write_to_file(&target, g.argv[4])<blob_size(&target) ){
-    fossil_fatal("cannot write %s\n", g.argv[4]);
+    fossil_fatal("cannot write %s", g.argv[4]);
   }
   blob_reset(&orig);
   blob_reset(&target);
@@ -169,7 +171,7 @@ void delta_apply_cmd(void){
 
 
 /*
-** COMMAND:  test-delta
+** COMMAND: test-delta
 **
 ** Usage: %fossil test-delta FILE1 FILE2
 **
@@ -182,8 +184,8 @@ void cmd_test_delta(void){
   Blob d12, d21;   /* Deltas from f1->f2 and f2->f1 */
   Blob a1, a2;     /* Recovered file content */
   if( g.argc!=4 ) usage("FILE1 FILE2");
-  blob_read_from_file(&f1, g.argv[2]);
-  blob_read_from_file(&f2, g.argv[3]);
+  blob_read_from_file(&f1, g.argv[2], ExtFILE);
+  blob_read_from_file(&f2, g.argv[3], ExtFILE);
   blob_delta_create(&f1, &f2, &d12);
   blob_delta_create(&f2, &f1, &d21);
   blob_delta_apply(&f1, &d12, &a2);

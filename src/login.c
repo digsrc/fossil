@@ -51,6 +51,7 @@
 #endif
 #include <time.h>
 
+
 /*
 ** Return the login-group name.  Or return 0 if this repository is
 ** not a member of a login-group.
@@ -176,12 +177,12 @@ int login_is_valid_anonymous(
 */
 void create_accesslog_table(void){
   db_multi_exec(
-    "CREATE TABLE IF NOT EXISTS %s.accesslog("
+    "CREATE TABLE IF NOT EXISTS repository.accesslog("
     "  uname TEXT,"
     "  ipaddr TEXT,"
     "  success BOOLEAN,"
     "  mtime TIMESTAMP"
-    ");", db_name("repository")
+    ");"
   );
 }
 
@@ -395,6 +396,13 @@ static int isHuman(const char *zAgent){
   }
   if( strncmp(zAgent, "Mozilla/", 8)==0 ){
     if( atoi(&zAgent[8])<4 ) return 0;  /* Many bots advertise as Mozilla/3 */
+
+    /* 2016-05-30:  A pernicious spider that likes to walk Fossil timelines has
+    ** been detected on the SQLite website.  The spider changes its user-agent
+    ** string frequently, but it always seems to include the following text:
+    */
+    if( sqlite3_strglob("*Safari/537.36Mozilla/5.0*", zAgent)==0 ) return 0;
+
     if( sqlite3_strglob("*Firefox/[1-9]*", zAgent)==0 ) return 1;
     if( sqlite3_strglob("*Chrome/[1-9]*", zAgent)==0 ) return 1;
     if( sqlite3_strglob("*(compatible;?MSIE?[1789]*", zAgent)==0 ) return 1;
@@ -496,10 +504,24 @@ void login_page(void){
   login_check_credentials();
   if( login_wants_https_redirect() ){
     const char *zQS = P("QUERY_STRING");
+    if( P("redir")!=0 ){
+      style_header("Insecure Connection");
+      @ <h1>Unable To Establish An Encrypted Connection</h1>
+      @ <p>This website requires that login credentials be sent over
+      @ an encrypted connection.  The current connection is not encrypted
+      @ across the entire route between your browser and the server.
+      @ An attempt was made to redirect to %h(g.zHttpsURL) but
+      @ the connection is still insecure even after the redirect.</p>
+      @ <p>This is probably some kind of configuration problem.  Please
+      @ contact your sysadmin.</p>
+      @ <p>Sorry it did not work out.</p>
+      style_footer();
+      return;
+    }
     if( zQS==0 ){
-      zQS = "";
+      zQS = "?redir=1";
     }else if( zQS[0]!=0 ){
-      zQS = mprintf("?%s", zQS);
+      zQS = mprintf("?%s&redir=1", zQS);
     }
     cgi_redirectf("%s%s%s", g.zHttpsURL, P("PATH_INFO"), zQS);
     return;
@@ -521,49 +543,59 @@ void login_page(void){
   if( g.perm.Password && zPasswd
    && (zNew1 = P("n1"))!=0 && (zNew2 = P("n2"))!=0
   ){
-    /* The user requests a password change */
-    zSha1Pw = sha1_shared_secret(zPasswd, g.zLogin, 0);
-    if( db_int(1, "SELECT 0 FROM user"
-                  " WHERE uid=%d"
-                  " AND (constant_time_cmp(pw,%Q)=0"
-                  "      OR constant_time_cmp(pw,%Q)=0)",
-                  g.userUid, zSha1Pw, zPasswd) ){
-      sleep(1);
-      zErrMsg =
-         @ <p><span class="loginError">
-         @ You entered an incorrect old password while attempting to change
-         @ your password.  Your password is unchanged.
-         @ </span></p>
-      ;
-    }else if( fossil_strcmp(zNew1,zNew2)!=0 ){
-      zErrMsg =
-         @ <p><span class="loginError">
-         @ The two copies of your new passwords do not match.
-         @ Your password is unchanged.
-         @ </span></p>
-      ;
-    }else{
-      char *zNewPw = sha1_shared_secret(zNew1, g.zLogin, 0);
-      char *zChngPw;
-      char *zErr;
-      db_multi_exec(
-         "UPDATE user SET pw=%Q WHERE uid=%d", zNewPw, g.userUid
-      );
-      fossil_free(zNewPw);
-      zChngPw = mprintf(
-         "UPDATE user"
-         "   SET pw=shared_secret(%Q,%Q,"
-         "        (SELECT value FROM config WHERE name='project-code'))"
-         " WHERE login=%Q",
-         zNew1, g.zLogin, g.zLogin
-      );
-      if( login_group_sql(zChngPw, "<p>", "</p>\n", &zErr) ){
-        zErrMsg = mprintf("<span class=\"loginError\">%s</span>", zErr);
-        fossil_free(zErr);
+    /* If there is not a "real" login, we cannot change any password. */
+    if( g.zLogin ){
+      /* The user requests a password change */
+      zSha1Pw = sha1_shared_secret(zPasswd, g.zLogin, 0);
+      if( db_int(1, "SELECT 0 FROM user"
+                    " WHERE uid=%d"
+                    " AND (constant_time_cmp(pw,%Q)=0"
+                    "      OR constant_time_cmp(pw,%Q)=0)",
+                    g.userUid, zSha1Pw, zPasswd) ){
+        sleep(1);
+        zErrMsg =
+           @ <p><span class="loginError">
+           @ You entered an incorrect old password while attempting to change
+           @ your password.  Your password is unchanged.
+           @ </span></p>
+        ;
+      }else if( fossil_strcmp(zNew1,zNew2)!=0 ){
+        zErrMsg =
+           @ <p><span class="loginError">
+           @ The two copies of your new passwords do not match.
+           @ Your password is unchanged.
+           @ </span></p>
+        ;
       }else{
-        redirect_to_g();
-        return;
+        char *zNewPw = sha1_shared_secret(zNew1, g.zLogin, 0);
+        char *zChngPw;
+        char *zErr;
+        db_multi_exec(
+           "UPDATE user SET pw=%Q WHERE uid=%d", zNewPw, g.userUid
+        );
+        fossil_free(zNewPw);
+        zChngPw = mprintf(
+           "UPDATE user"
+           "   SET pw=shared_secret(%Q,%Q,"
+           "        (SELECT value FROM config WHERE name='project-code'))"
+           " WHERE login=%Q",
+           zNew1, g.zLogin, g.zLogin
+        );
+        if( login_group_sql(zChngPw, "<p>", "</p>\n", &zErr) ){
+          zErrMsg = mprintf("<span class=\"loginError\">%s</span>", zErr);
+          fossil_free(zErr);
+        }else{
+          redirect_to_g();
+          return;
+        }
       }
+    }else{
+      zErrMsg =
+         @ <p><span class="loginError">
+         @ The password cannot be changed for this type of login.
+         @ The password is unchanged.
+         @ </span></p>
+      ;
     }
   }
   zIpAddr = PD("REMOTE_ADDR","nil");   /* Complete IP address for logging */
@@ -616,7 +648,14 @@ void login_page(void){
       @ <p>Login as a named user to access page <b>%h(zAbbrev)</b>.
     }
   }
-  form_begin(0, "%R/login");
+  if( g.sslNotAvailable==0
+   && strncmp(g.zBaseURL,"https:",6)!=0
+   && db_get_boolean("https-login",0)
+  ){
+    form_begin(0, "https:%s/login", g.zBaseURL+5);
+  }else{
+    form_begin(0, "%R/login");
+  }
   if( zGoto ){
     @ <input type="hidden" name="g" value="%h(zGoto)" />
   }else if( zReferer && strncmp(g.zBaseURL, zReferer, strlen(g.zBaseURL))==0 ){
@@ -639,6 +678,19 @@ void login_page(void){
   }else{
     @ <td><input type="text" id="u" name="u" value="" size="30" /></td>
   }
+  if( P("HTTPS")==0 ){
+    @ <td width="15"><td rowspan="3">
+    @ <p class='securityWarning'>
+    @ Warning: Your password will be sent in the clear over an
+    @ unencrypted connection.
+    if( g.sslNotAvailable ){
+      @ No encrypted connection is available on this server.
+    }else{
+      @ Consider logging in at
+      @ <a href='%s(g.zHttpsURL)'>%h(g.zHttpsURL)</a> instead.
+    }
+    @ </p>
+  }
   @ </tr>
   @ <tr>
   @  <td class="login_out_label">Password:</td>
@@ -651,24 +703,9 @@ void login_page(void){
   }
   @ <tr>
   @   <td></td>
-  @   <td><input type="submit" name="in" value="Login"
-  @        onClick="chngAction(this.form)" /></td>
+  @   <td><input type="submit" name="in" value="Login">
   @ </tr>
   @ </table>
-  @ <script>
-  @   gebi('u').focus()
-  @   function chngAction(form){
-  if( g.sslNotAvailable==0
-   && strncmp(g.zBaseURL,"https:",6)!=0
-   && db_get_boolean("https-login",0)
-  ){
-     char *zSSL = mprintf("https:%s", &g.zBaseURL[5]);
-     @  if( form.u.value!="anonymous" ){
-     @     form.action = "%h(zSSL)/login";
-     @  }
-  }
-  @ }
-  @ </script>
   @ <p>Pressing the Login button grants permission to store a cookie.</p>
   if( db_get_boolean("self-register", 0) ){
     @ <p>If you do not have an account, you can
@@ -687,14 +724,15 @@ void login_page(void){
     @ %h(zCaptcha)
     @ </pre></td></tr></table>
     if( bAutoCaptcha ) {
-        @ <input type="button" value="Fill out captcha"
-        @  onclick="gebi('u').value='anonymous'; gebi('p').value='%s(zDecoded)';" />
+       @ <input type="button" value="Fill out captcha" id='autofillButton' \
+       @ data-af='%s(zDecoded)' />
+       style_load_one_js_file("login.js");
     }
     @ </div>
     free(zCaptcha);
   }
   @ </form>
-  if( g.perm.Password ){
+  if( g.zLogin && g.perm.Password ){
     @ <hr />
     @ <p>Change Password for user <b>%h(g.zLogin)</b>:</p>
     form_begin(0, "%R/login");
@@ -831,6 +869,57 @@ int login_wants_https_redirect(void){
   return 1;
 }
 
+
+/*
+** Attempt to use Basic Authentication to establish the user.  Return the
+** (non-zero) uid if successful.  Return 0 if it does not work.
+*/
+static int logic_basic_authentication(const char *zIpAddr){
+  const char *zAuth = PD("HTTP_AUTHORIZATION", 0);
+  int i;
+  int uid = 0;
+  int nDecode = 0;
+  char *zDecode = 0;
+  const char *zUsername = 0;
+  const char *zPasswd = 0;
+
+  if( zAuth==0 ) return 0;                    /* Fail: No Authentication: header */
+  while( fossil_isspace(zAuth[0]) ) zAuth++;  /* Skip leading whitespace */
+  if( strncmp(zAuth, "Basic ", 6)!=0 ) return 0;  /* Fail: Not Basic Authentication */
+
+  /* Parse out the username and password, separated by a ":" */
+  zAuth += 6;
+  while( fossil_isspace(zAuth[0]) ) zAuth++;
+  zDecode = decode64(zAuth, &nDecode);
+
+  for(i=0; zDecode[i] && zDecode[i]!=':'; i++){}
+  if( zDecode[i] ){
+    zDecode[i] = 0;
+    zUsername = zDecode;
+    zPasswd = &zDecode[i+1];
+
+    /* Attempting to log in as the user provided by HTTP
+    ** basic auth
+    */
+    uid = login_search_uid(zUsername, zPasswd);
+    if( uid>0 ){
+      record_login_attempt(zUsername, zIpAddr, 1);
+    }else{
+      record_login_attempt(zUsername, zIpAddr, 0);
+
+      /* The user attempted to login specifically with HTTP basic
+      ** auth, but provided invalid credentials. Inform them of
+      ** the failed login attempt via 401.
+      */
+      cgi_set_status(401, "Unauthorized");
+      cgi_reply();
+      fossil_exit(0);
+    }
+  }
+  fossil_free(zDecode);
+  return uid;
+}
+
 /*
 ** This routine examines the login cookie to see if it exists and
 ** is valid.  If the login cookie checks out, it then sets global
@@ -866,8 +955,8 @@ void login_check_credentials(void){
   ** full access rights without having to log in.
   */
   zRemoteAddr = ipPrefix(zIpAddr = PD("REMOTE_ADDR","nil"));
-  if( ( fossil_strcmp(zIpAddr, "127.0.0.1")==0 ||
-        (g.fSshClient & CGI_SSH_CLIENT)!=0 )
+  if( ( cgi_is_loopback(zIpAddr)
+       || (g.fSshClient & CGI_SSH_CLIENT)!=0 )
    && g.useLocalauth
    && db_get_int("localauth",0)==0
    && P("HTTPS")==0
@@ -952,6 +1041,14 @@ void login_check_credentials(void){
     }
   }
 
+  /* If the request didn't provide a login cookie or the login cookie didn't
+  ** match a known valid user, check the HTTP "Authorization" header and
+  ** see if those credentials are valid for a known user.
+  */
+  if( uid==0 && db_get_boolean("http_authentication_ok",0) ){
+    uid = logic_basic_authentication(zIpAddr);
+  }
+
   /* If no user found yet, try to log in as "nobody" */
   if( uid==0 ){
     uid = db_int(0, "SELECT uid FROM user WHERE login='nobody'");
@@ -990,17 +1087,24 @@ void login_check_credentials(void){
   if( fossil_strcmp(g.zLogin,"nobody")==0 ){
     g.zLogin = 0;
   }
-  g.isHuman = g.zLogin==0 ? isHuman(P("HTTP_USER_AGENT")) : 1;
+  if( PB("isrobot") ){
+    g.isHuman = 0;
+  }else if( g.zLogin==0 ){
+    g.isHuman = isHuman(P("HTTP_USER_AGENT"));
+  }else{
+    g.isHuman = 1;
+  }
 
   /* Set the capabilities */
   login_replace_capabilities(zCap, 0);
-  login_set_anon_nobody_capabilities();
 
   /* The auto-hyperlink setting allows hyperlinks to be displayed for users
   ** who do not have the "h" permission as long as their UserAgent string
   ** makes it appear that they are human.  Check to see if auto-hyperlink is
   ** enabled for this repository and make appropriate adjustments to the
-  ** permission flags if it is.
+  ** permission flags if it is.  This should be done before the permissions
+  ** are (potentially) copied to the anonymous permission set; otherwise,
+  ** those will be out-of-sync.
   */
   if( zCap[0]
    && !g.perm.Hyperlink
@@ -1010,6 +1114,16 @@ void login_check_credentials(void){
     g.perm.Hyperlink = 1;
     g.javascriptHyperlink = 1;
   }
+
+  /*
+  ** At this point, the capabilities for the logged in user are not going
+  ** to be modified anymore; therefore, we can copy them over to the ones
+  ** for the anonymous user.
+  **
+  ** WARNING: In the future, please do not add code after this point that
+  **          modifies the capabilities for the logged in user.
+  */
+  login_set_anon_nobody_capabilities();
 
   /* If the public-pages glob pattern is defined and REQUEST_URI matches
   ** one of the globs in public-pages, then also add in all default-perms
@@ -1077,15 +1191,16 @@ void login_set_capabilities(const char *zCap, unsigned flags){
   }
   for(i=0; zCap[i]; i++){
     switch( zCap[i] ){
-      case 's':   p->Setup = 1;  /* Fall thru into Admin */
+      case 's':   p->Setup = 1; /* Fall thru into Admin */
       case 'a':   p->Admin = p->RdTkt = p->WrTkt = p->Zip =
-                           p->RdWiki = p->WrWiki = p->NewWiki =
-                           p->ApndWiki = p->Hyperlink = p->Clone =
-                           p->NewTkt = p->Password = p->RdAddr =
-                           p->TktFmt = p->Attach = p->ApndTkt =
-                           p->ModWiki = p->ModTkt = 1;
-                           /* Fall thru into Read/Write */
-      case 'i':   p->Read = p->Write = 1;                     break;
+                             p->RdWiki = p->WrWiki = p->NewWiki =
+                             p->ApndWiki = p->Hyperlink = p->Clone =
+                             p->NewTkt = p->Password = p->RdAddr =
+                             p->TktFmt = p->Attach = p->ApndTkt =
+                             p->ModWiki = p->ModTkt = p->Delete =
+                             p->WrUnver = p->Private = 1;
+                             /* Fall thru into Read/Write */
+      case 'i':   p->Read = p->Write = 1;                      break;
       case 'o':   p->Read = 1;                                 break;
       case 'z':   p->Zip = 1;                                  break;
 
@@ -1095,7 +1210,7 @@ void login_set_capabilities(const char *zCap, unsigned flags){
       case 'p':   p->Password = 1;                             break;
 
       case 'j':   p->RdWiki = 1;                               break;
-      case 'k':   p->WrWiki = p->RdWiki = p->ApndWiki =1;    break;
+      case 'k':   p->WrWiki = p->RdWiki = p->ApndWiki =1;      break;
       case 'm':   p->ApndWiki = 1;                             break;
       case 'f':   p->NewWiki = 1;                              break;
       case 'l':   p->ModWiki = 1;                              break;
@@ -1110,6 +1225,7 @@ void login_set_capabilities(const char *zCap, unsigned flags){
       case 't':   p->TktFmt = 1;                               break;
       case 'b':   p->Attach = 1;                               break;
       case 'x':   p->Private = 1;                              break;
+      case 'y':   p->WrUnver = 1;                              break;
 
       /* The "u" privileges is a little different.  It recursively
       ** inherits all privileges of the user named "reader" */
@@ -1181,9 +1297,9 @@ int login_has_capability(const char *zCap, int nCap, u32 flgs){
       /* case 'v': DEVELOPER */
       case 'w':  rc = p->WrTkt;     break;
       case 'x':  rc = p->Private;   break;
-      /* case 'y': */
+      case 'y':  rc = p->WrUnver;   break;
       case 'z':  rc = p->Zip;       break;
-      default:   rc = 0;             break;
+      default:   rc = 0;            break;
     }
   }
   return rc;
@@ -1250,7 +1366,7 @@ void login_needed(int anonOk){
     const char *zQS = P("QUERY_STRING");
     Blob redir;
     blob_init(&redir, 0, 0);
-    if( login_wants_https_redirect() ){
+    if( login_wants_https_redirect() && !g.sslNotAvailable ){
       blob_appendf(&redir, "%s/login?g=%T", g.zHttpsURL, zUrl);
     }else{
       blob_appendf(&redir, "%R/login?g=%T", zUrl);
@@ -1291,8 +1407,9 @@ void login_insert_csrf_secret(void){
 /*
 ** Before using the results of a form, first call this routine to verify
 ** that this Anti-CSRF token is present and is valid.  If the Anti-CSRF token
-** is missing or is incorrect, that indicates a cross-site scripting attach
-** so emits an error message and abort.
+** is missing or is incorrect, that indicates a cross-site scripting attack.
+** If the event of an attack is detected, an error message is generated and
+** all further processing is aborted.
 */
 void login_verify_csrf_secret(void){
   if( g.okCsrf ) return;
@@ -1363,7 +1480,7 @@ void register_page(void){
         /* Here lies the reason I don't use zErrMsg - it would not substitute
          * this %s(zUsername), or at least I don't know how to force it to.*/
         @ <p><span class="loginError">
-        @ %s(zUsername) already exists.
+        @ %h(zUsername) already exists.
         @ </span></p>
       }else{
         char *zPw = sha1_shared_secret(blob_str(&passwd), blob_str(&login), 0);
@@ -1470,7 +1587,7 @@ int login_group_sql(
   );
   while( db_step(&q)==SQLITE_ROW ){
     const char *zRepoName = db_column_text(&q, 1);
-    if( file_size(zRepoName)<0 ){
+    if( file_size(zRepoName, ExtFILE)<0 ){
       /* Silently remove non-existent repositories from the login group. */
       const char *zLabel = db_column_text(&q, 0);
       db_multi_exec(
@@ -1541,7 +1658,7 @@ void login_group_join(
   const char *zSelf;         /* The ATTACH name of our repository */
 
   *pzErrMsg = 0;   /* Default to no errors */
-  zSelf = db_name("repository");
+  zSelf = "repository";
 
   /* Get the full pathname of the other repository */
   file_canonical_name(zRepo, &fullName, 0);
@@ -1566,7 +1683,7 @@ void login_group_join(
   }
 
   /* Make sure the other repository is a valid Fossil database */
-  if( file_size(zRepo)<0 ){
+  if( file_size(zRepo, ExtFILE)<0 ){
     *pzErrMsg = mprintf("repository file \"%s\" does not exist", zRepo);
     return;
   }

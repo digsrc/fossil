@@ -2,7 +2,7 @@
   <th1>
   proc getTclVersion {} {
     if {[catch {tclEval info patchlevel} tclVersion] == 0} {
-      return "<a href=\"http://www.tcl.tk/\">Tcl</a> version $tclVersion"
+      return "<a href=\"https://www.tcl.tk/\">Tcl</a> version $tclVersion"
     }
     return ""
   }
@@ -22,4 +22,3 @@
   <a href="$fossilUrl/index.html/info/$version">$manifest_version</a>
   <a href="$fossilUrl/index.html/timeline?c=$fossilDate&amp;y=ci">$manifest_date</a>
 </div>
-</body></html>

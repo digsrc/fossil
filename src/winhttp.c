@@ -22,8 +22,225 @@
 #include "config.h"
 #ifdef _WIN32
 /* This code is for win32 only */
+#include <ws2tcpip.h>
 #include <windows.h>
+#include <process.h>
 #include "winhttp.h"
+
+#ifndef IPV6_V6ONLY
+# define IPV6_V6ONLY 27  /* Because this definition is missing in MinGW */
+#endif
+
+/*
+** The SocketAddr structure holds a SOCKADDR_STORAGE and its content size.
+*/
+typedef struct SocketAddr SocketAddr;
+struct SocketAddr {
+  SOCKADDR_STORAGE addr;
+  int len;
+};
+
+static char* SocketAddr_toString(const SocketAddr* pAddr){
+  SocketAddr addr;
+  char* zIp;
+  DWORD nIp = 50;
+  assert( pAddr!=NULL );
+  memcpy(&addr, pAddr, sizeof(SocketAddr));
+  if( addr.len==sizeof(SOCKADDR_IN6) ){
+    ((SOCKADDR_IN6*)&addr)->sin6_port = 0;
+  }else{
+    ((SOCKADDR_IN*)&addr)->sin_port = 0;
+  }
+  zIp = fossil_malloc(nIp);
+  if( WSAAddressToStringA((SOCKADDR*)&addr, addr.len, NULL, zIp, &nIp)!=0 ){
+    zIp[0] = 0;
+  }
+  return zIp;
+}
+
+/*
+** The DualAddr structure holds two SocketAddr (one IPv4 and on IPv6).
+*/
+typedef struct DualAddr DualAddr;
+struct DualAddr {
+  SocketAddr a4;  /* IPv4 SOCKADDR_IN */
+  SocketAddr a6;  /* IPv6 SOCKADDR_IN6 */
+};
+
+static void DualAddr_init(DualAddr* pDA){
+  assert( pDA!=NULL );
+  memset(pDA, 0, sizeof(DualAddr));
+  pDA->a4.len = sizeof(SOCKADDR_IN);
+  pDA->a6.len = sizeof(SOCKADDR_IN6);
+}
+
+/*
+** The DualSocket structure holds two SOCKETs. One or both could be
+** used or INVALID_SOCKET.  One is dedicated to IPv4, the other to IPv6.
+*/
+typedef struct DualSocket DualSocket;
+struct DualSocket {
+  SOCKET s4;    /* IPv4 socket or INVALID_SOCKET */
+  SOCKET s6;    /* IPv6 socket or INVALID_SOCKET */
+};
+
+/*
+** Initializes a DualSocket.
+*/
+static void DualSocket_init(DualSocket* ds){
+  assert( ds!=NULL );
+  ds->s4 = INVALID_SOCKET;
+  ds->s6 = INVALID_SOCKET;
+};
+
+/*
+** Close and reset a DualSocket.
+*/
+static void DualSocket_close(DualSocket* ds){
+  assert( ds!=NULL );
+  if( ds->s4!=INVALID_SOCKET ){
+    closesocket(ds->s4);
+    ds->s4 = INVALID_SOCKET;
+  }
+  if( ds->s6!=INVALID_SOCKET ){
+    closesocket(ds->s6);
+    ds->s6 = INVALID_SOCKET;
+  }
+};
+
+/*
+** When ip is "W", listen to wildcard address (IPv4/IPv6 as available).
+** When ip is "L", listen to loopback address (IPv4/IPv6 as available).
+** Else listen only the specified ip, which is either IPv4 or IPv6 or invalid.
+** Returns 1 on success, 0 on failure.
+*/
+static int DualSocket_listen(DualSocket* ds, const char* zIp, int iPort){
+  SOCKADDR_IN addr4;
+  SOCKADDR_IN6 addr6;
+  assert( ds!=NULL && zIp!=NULL && iPort!=0 );
+  DualSocket_close(ds);
+  memset(&addr4, 0, sizeof(addr4));
+  memset(&addr6, 0, sizeof(addr6));
+  if (strcmp(zIp, "W")==0 || strcmp(zIp, "L")==0 ){
+    ds->s4 = socket(AF_INET, SOCK_STREAM, 0);
+    ds->s6 = socket(AF_INET6, SOCK_STREAM, 0);
+    if( ds->s4==INVALID_SOCKET && ds->s6==INVALID_SOCKET ){
+      return 0;
+    }
+    if (ds->s4!=INVALID_SOCKET ) {
+      addr4.sin_family = AF_INET;
+      addr4.sin_port = htons(iPort);
+      if( strcmp(zIp, "L")==0 ){
+        addr4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+      }else{
+        addr4.sin_addr.s_addr = INADDR_ANY;
+      }
+    }
+    if( ds->s6!=INVALID_SOCKET ) {
+      DWORD ipv6only = 1; /* don't want a dual-stack socket */
+      setsockopt(ds->s6, IPPROTO_IPV6, IPV6_V6ONLY, (char*)&ipv6only,
+                 sizeof(ipv6only));
+      addr6.sin6_family = AF_INET6;
+      addr6.sin6_port = htons(iPort);
+      if( strcmp(zIp, "L")==0 ){
+        memcpy(&addr6.sin6_addr, &in6addr_loopback, sizeof(in6addr_loopback));
+      }else{
+        memcpy(&addr6.sin6_addr, &in6addr_any, sizeof(in6addr_any));
+      }
+    }
+  }else{
+    if( strstr(zIp, ".") ){
+      int addrlen = sizeof(addr4);
+      ds->s4 = socket(AF_INET, SOCK_STREAM, 0);
+      if( ds->s4==INVALID_SOCKET ){
+        return 0;
+      }
+      addr4.sin_family = AF_INET;
+      if (WSAStringToAddress((char*)zIp, AF_INET, NULL,
+                             (struct sockaddr *)&addr4, &addrlen) != 0){
+        return 0;
+      }
+      addr4.sin_port = htons(iPort);
+    }else{
+      DWORD ipv6only = 1; /* don't want a dual-stack socket */
+      int addrlen = sizeof(addr6);
+      ds->s6 = socket(AF_INET6, SOCK_STREAM, 0);
+      if( ds->s6==INVALID_SOCKET ){
+        return 0;
+      }
+      setsockopt(ds->s6, IPPROTO_IPV6, IPV6_V6ONLY, (char*)&ipv6only,
+                 sizeof(ipv6only));
+      addr6.sin6_family = AF_INET6;
+      if (WSAStringToAddress((char*)zIp, AF_INET6, NULL,
+                             (struct sockaddr *)&addr6, &addrlen) != 0){
+        return 0;
+      }
+      addr6.sin6_port = htons(iPort);
+    }
+  }
+  assert( ds->s4!=INVALID_SOCKET || ds->s6!=INVALID_SOCKET );
+  if( ds->s4!=INVALID_SOCKET && bind(ds->s4, (struct sockaddr*)&addr4,
+                                 sizeof(addr4))==SOCKET_ERROR ){
+    return 0;
+  }
+  if( ds->s6!=INVALID_SOCKET && bind(ds->s6, (struct sockaddr*)&addr6,
+                                 sizeof(addr6))==SOCKET_ERROR ){
+    return 0;
+  }
+  if( ds->s4!=INVALID_SOCKET && listen(ds->s4, SOMAXCONN)==SOCKET_ERROR ){
+    return 0;
+  }
+  if( ds->s6!=INVALID_SOCKET && listen(ds->s6, SOMAXCONN)==SOCKET_ERROR ){
+    return 0;
+  }
+  return 1;
+};
+
+/*
+** Accepts connections on DualSocket.
+*/
+static void DualSocket_accept(DualSocket* pListen, DualSocket* pClient,
+                              DualAddr* pClientAddr){
+	fd_set rs;
+  int rs_count = 0;
+  assert( pListen!=NULL && pClient!=NULL && pClientAddr!= NULL );
+  DualSocket_init(pClient);
+  DualAddr_init(pClientAddr);
+  FD_ZERO(&rs);
+	if( pListen->s4!=INVALID_SOCKET ){
+    FD_SET(pListen->s4, &rs);
+    ++rs_count;
+  }
+	if( pListen->s6!=INVALID_SOCKET ){
+    FD_SET(pListen->s6, &rs);
+    ++rs_count;
+  }
+	if( select(rs_count, &rs, 0, 0, 0 /*blocking*/)==SOCKET_ERROR ){
+		return;
+  }
+  if( FD_ISSET(pListen->s4, &rs) ){
+    pClient->s4 = accept(pListen->s4, (struct sockaddr*)&pClientAddr->a4.addr,
+                         &pClientAddr->a4.len);
+  }
+  if( FD_ISSET(pListen->s6, &rs) ){
+    pClient->s6 = accept(pListen->s6, (struct sockaddr*)&pClientAddr->a6.addr,
+                         &pClientAddr->a6.len);
+  }
+}
+
+/*
+** The HttpServer structure holds information about an instance of
+** the HTTP server itself.
+*/
+typedef struct HttpServer HttpServer;
+struct HttpServer {
+  HANDLE hStoppedEvent; /* Event to signal when server is stopped,
+                        ** must be closed by callee. */
+  char *zStopper;       /* The stopper file name, must be freed by
+                        ** callee. */
+  DualSocket listener;  /* Sockets on which the server is listening,
+                        ** may be closed by callee. */
+};
 
 /*
 ** The HttpRequest structure holds information about each incoming
@@ -33,9 +250,9 @@ typedef struct HttpRequest HttpRequest;
 struct HttpRequest {
   int id;                /* ID counter */
   SOCKET s;              /* Socket on which to receive data */
-  SOCKADDR_IN addr;      /* Address from which data is coming */
+  SocketAddr addr;       /* Address from which data is coming */
   int flags;             /* Flags passed to win32_http_server() */
-  const char *zOptions;  /* --notfound and/or --localauth options */
+  const char *zOptions;  /* --baseurl, --notfound, --localauth, --th-trace */
 };
 
 /*
@@ -73,26 +290,66 @@ static NORETURN void winhttp_fatal(
 }
 
 /*
+** Make sure the server stops as soon as possible after the stopper file
+** is found.  If there is no stopper file name, do nothing.
+*/
+static void win32_server_stopper(void *pAppData){
+  HttpServer *p = (HttpServer*)pAppData;
+  if( p!=0 ){
+    HANDLE hStoppedEvent = p->hStoppedEvent;
+    const char *zStopper = p->zStopper;
+    if( hStoppedEvent!=NULL && zStopper!=0 ){
+      while( 1 ){
+        DWORD dwResult = WaitForMultipleObjectsEx(1, &hStoppedEvent, FALSE,
+                                                  1000, TRUE);
+        if( dwResult!=WAIT_IO_COMPLETION && dwResult!=WAIT_TIMEOUT ){
+          /* The event is either invalid, signaled, or abandoned.  Bail
+          ** out now because those conditions should indicate the parent
+          ** thread is dead or dying. */
+          break;
+        }
+        if( file_size(zStopper, ExtFILE)>=0 ){
+          /* The stopper file has been found.  Attempt to close the server
+          ** listener socket now and then exit. */
+          DualSocket_close(&p->listener);
+          break;
+        }
+      }
+    }
+    if( hStoppedEvent!=NULL ){
+      CloseHandle(hStoppedEvent);
+      p->hStoppedEvent = NULL;
+    }
+    if( zStopper!=0 ){
+      fossil_free(p->zStopper);
+      p->zStopper = 0;
+    }
+    fossil_free(p);
+  }
+}
+
+/*
 ** Process a single incoming HTTP request.
 */
 static void win32_http_request(void *pAppData){
   HttpRequest *p = (HttpRequest*)pAppData;
-  FILE *in = 0, *out = 0;
-  int amt, got;
+  FILE *in = 0, *out = 0, *aux = 0;
+  int amt, got, i;
   int wanted = 0;
   char *z;
+  char *zIp;
   char zCmdFName[MAX_PATH];
   char zRequestFName[MAX_PATH];
   char zReplyFName[MAX_PATH];
   char zCmd[2000];          /* Command-line to process the request */
-  char zHdr[2000];          /* The HTTP request header */
+  char zHdr[4000];          /* The HTTP request header */
 
   sqlite3_snprintf(MAX_PATH, zCmdFName,
-                   "%s_cmd%d.txt", zTempPrefix, p->id);
+                   "%s_%06d_cmd.txt", zTempPrefix, p->id);
   sqlite3_snprintf(MAX_PATH, zRequestFName,
-                   "%s_in%d.txt", zTempPrefix, p->id);
+                   "%s_%06d_in.txt", zTempPrefix, p->id);
   sqlite3_snprintf(MAX_PATH, zReplyFName,
-                   "%s_out%d.txt", zTempPrefix, p->id);
+                   "%s_%06d_out.txt", zTempPrefix, p->id);
   amt = 0;
   while( amt<sizeof(zHdr) ){
     got = recv(p->s, &zHdr[amt], sizeof(zHdr)-1-amt, 0);
@@ -123,34 +380,35 @@ static void win32_http_request(void *pAppData){
     }
     wanted -= got;
   }
-  fclose(out);
-  out = 0;
+
   /*
   ** The repository name is only needed if there was no open checkout.  This
   ** is designed to allow the open checkout for the interactive user to work
   ** with the local Fossil server started via the "ui" command.
   */
+  zIp = SocketAddr_toString(&p->addr);
   if( (p->flags & HTTP_SERVER_HAD_CHECKOUT)==0 ){
     assert( g.zRepositoryName && g.zRepositoryName[0] );
     sqlite3_snprintf(sizeof(zCmd), zCmd, "%s%s\n%s\n%s\n%s",
-      get_utf8_bom(0), zRequestFName, zReplyFName, inet_ntoa(p->addr.sin_addr),
-      g.zRepositoryName
+      get_utf8_bom(0), zRequestFName, zReplyFName, zIp, g.zRepositoryName
     );
   }else{
     sqlite3_snprintf(sizeof(zCmd), zCmd, "%s%s\n%s\n%s",
-      get_utf8_bom(0), zRequestFName, zReplyFName, inet_ntoa(p->addr.sin_addr)
+      get_utf8_bom(0), zRequestFName, zReplyFName, zIp
     );
   }
-  out = fossil_fopen(zCmdFName, "wb");
-  if( out==0 ) goto end_request;
-  fwrite(zCmd, 1, strlen(zCmd), out);
-  fclose(out);
+  fossil_free(zIp);
+  aux = fossil_fopen(zCmdFName, "wb");
+  if( aux==0 ) goto end_request;
+  fwrite(zCmd, 1, strlen(zCmd), aux);
 
   sqlite3_snprintf(sizeof(zCmd), zCmd, "\"%s\" http -args \"%s\" --nossl%s",
     g.nameOfExe, zCmdFName, p->zOptions
   );
+  in = fossil_fopen(zReplyFName, "w+b");
+  fflush(out);
+  fflush(aux);
   fossil_system(zCmd);
-  in = fossil_fopen(zReplyFName, "rb");
   if( in ){
     while( (got = fread(zHdr, 1, sizeof(zHdr), in))>0 ){
       send(p->s, zHdr, got, 0);
@@ -159,12 +417,18 @@ static void win32_http_request(void *pAppData){
 
 end_request:
   if( out ) fclose(out);
+  if( aux ) fclose(aux);
   if( in ) fclose(in);
+  /* Initiate shutdown prior to closing the socket */
+  if( shutdown(p->s,1)==0 ) shutdown(p->s,0);
   closesocket(p->s);
-  file_delete(zRequestFName);
-  file_delete(zReplyFName);
-  file_delete(zCmdFName);
-  free(p);
+  /* Make multiple attempts to delete the temporary files.  Sometimes AV
+  ** software keeps the files open for a few seconds, preventing the file
+  ** from being deleted on the first try. */
+  for(i=1; i<=10 && file_delete(zRequestFName); i++){ Sleep(1000*i); }
+  for(i=1; i<=10 && file_delete(zCmdFName); i++){ Sleep(1000*i); }
+  for(i=1; i<=10 && file_delete(zReplyFName); i++){ Sleep(1000*i); }
+  fossil_free(p);
 }
 
 /*
@@ -175,15 +439,16 @@ static void win32_scgi_request(void *pAppData){
   FILE *in = 0, *out = 0;
   int amt, got, nHdr, i;
   int wanted = 0;
+  char *zIp;
   char zRequestFName[MAX_PATH];
   char zReplyFName[MAX_PATH];
   char zCmd[2000];          /* Command-line to process the request */
-  char zHdr[2000];          /* The SCGI request header */
+  char zHdr[4000];          /* The SCGI request header */
 
   sqlite3_snprintf(MAX_PATH, zRequestFName,
-                   "%s_in%d.txt", zTempPrefix, p->id);
+                   "%s_%06d_in.txt", zTempPrefix, p->id);
   sqlite3_snprintf(MAX_PATH, zReplyFName,
-                   "%s_out%d.txt", zTempPrefix, p->id);
+                   "%s_%06d_out.txt", zTempPrefix, p->id);
   out = fossil_fopen(zRequestFName, "wb");
   if( out==0 ) goto end_request;
   amt = 0;
@@ -204,16 +469,17 @@ static void win32_scgi_request(void *pAppData){
     fwrite(zHdr, 1, got, out);
     wanted += got;
   }
-  fclose(out);
-  out = 0;
   assert( g.zRepositoryName && g.zRepositoryName[0] );
+  zIp = SocketAddr_toString(&p->addr);
   sqlite3_snprintf(sizeof(zCmd), zCmd,
     "\"%s\" http \"%s\" \"%s\" %s \"%s\" --scgi --nossl%s",
-    g.nameOfExe, zRequestFName, zReplyFName, inet_ntoa(p->addr.sin_addr),
+    g.nameOfExe, zRequestFName, zReplyFName, zIp,
     g.zRepositoryName, p->zOptions
   );
+  fossil_free(zIp);
+  in = fossil_fopen(zReplyFName, "w+b");
+  fflush(out);
   fossil_system(zCmd);
-  in = fossil_fopen(zReplyFName, "rb");
   if( in ){
     while( (got = fread(zHdr, 1, sizeof(zHdr), in))>0 ){
       send(p->s, zHdr, got, 0);
@@ -223,12 +489,19 @@ static void win32_scgi_request(void *pAppData){
 end_request:
   if( out ) fclose(out);
   if( in ) fclose(in);
+  /* Initiate shutdown prior to closing the socket */
+  if( shutdown(p->s,1)==0 ) shutdown(p->s,0);
   closesocket(p->s);
-  file_delete(zRequestFName);
-  file_delete(zReplyFName);
-  free(p);
+  /* Make multiple attempts to delete the temporary files.  Sometimes AV
+  ** software keeps the files open for a few seconds, preventing the file
+  ** from being deleted on the first try. */
+  for(i=1; i<=10 && file_delete(zRequestFName); i++){ Sleep(1000*i); }
+  for(i=1; i<=10 && file_delete(zReplyFName); i++){ Sleep(1000*i); }
+  fossil_free(p);
 }
 
+/* forward reference */
+static void win32_http_service_running(DualSocket* pS);
 
 /*
 ** Start a listening socket and process incoming HTTP requests on
@@ -238,21 +511,29 @@ void win32_http_server(
   int mnPort, int mxPort,   /* Range of allowed TCP port numbers */
   const char *zBrowser,     /* Command to launch browser.  (Or NULL) */
   const char *zStopper,     /* Stop server when this file is exists (Or NULL) */
+  const char *zBaseUrl,     /* The --baseurl option, or NULL */
   const char *zNotFound,    /* The --notfound option, or NULL */
   const char *zFileGlob,    /* The --fileglob option, or NULL */
   const char *zIpAddr,      /* Bind to this IP address, if not NULL */
   int flags                 /* One or more HTTP_SERVER_ flags */
 ){
+  HANDLE hStoppedEvent;
   WSADATA wd;
-  SOCKET s = INVALID_SOCKET;
-  SOCKADDR_IN addr;
+  DualSocket ds;
   int idCnt = 0;
   int iPort = mnPort;
   Blob options;
   wchar_t zTmpPath[MAX_PATH];
+  const char *zSkin;
+#if USE_SEE
+  const char *zSavedKey = 0;
+  size_t savedKeySize = 0;
+#endif
 
-  if( zStopper ) file_delete(zStopper);
   blob_zero(&options);
+  if( zBaseUrl ){
+    blob_appendf(&options, " --baseurl %s", zBaseUrl);
+  }
   if( zNotFound ){
     blob_appendf(&options, " --notfound %s", zNotFound);
   }
@@ -262,44 +543,48 @@ void win32_http_server(
   if( g.useLocalauth ){
     blob_appendf(&options, " --localauth");
   }
+  if( g.thTrace ){
+    blob_appendf(&options, " --th-trace");
+  }
   if( flags & HTTP_SERVER_REPOLIST ){
     blob_appendf(&options, " --repolist");
   }
-  if( WSAStartup(MAKEWORD(1,1), &wd) ){
+  zSkin = skin_in_use();
+  if( zSkin ){
+    blob_appendf(&options, " --skin %s", zSkin);
+  }
+#if USE_SEE
+  zSavedKey = db_get_saved_encryption_key();
+  savedKeySize = db_get_saved_encryption_key_size();
+  if( zSavedKey!=0 && savedKeySize>0 ){
+    blob_appendf(&options, " --usepidkey %lu:%p:%u", GetCurrentProcessId(),
+                 zSavedKey, savedKeySize);
+  }
+#endif
+  if( WSAStartup(MAKEWORD(2,0), &wd) ){
     fossil_fatal("unable to initialize winsock");
   }
+  DualSocket_init(&ds);
   while( iPort<=mxPort ){
-    s = socket(AF_INET, SOCK_STREAM, 0);
-    if( s==INVALID_SOCKET ){
-      fossil_fatal("unable to create a socket");
-    }
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(iPort);
     if( zIpAddr ){
-      addr.sin_addr.s_addr = inet_addr(zIpAddr);
-      if( addr.sin_addr.s_addr == (-1) ){
-        fossil_fatal("not a valid IP address: %s", zIpAddr);
+      if( DualSocket_listen(&ds, zIpAddr, iPort)==0 ){
+        iPort++;
+        continue;
       }
-    }else if( flags & HTTP_SERVER_LOCALHOST ){
-      addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     }else{
-      addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    }
-    if( bind(s, (struct sockaddr*)&addr, sizeof(addr))==SOCKET_ERROR ){
-      closesocket(s);
-      iPort++;
-      continue;
-    }
-    if( listen(s, SOMAXCONN)==SOCKET_ERROR ){
-      closesocket(s);
-      iPort++;
-      continue;
+      if( DualSocket_listen(&ds,
+                            (flags & HTTP_SERVER_LOCALHOST) ? "L" : "W",
+                            iPort
+                           )==0 ){
+        iPort++;
+        continue;
+      }
     }
     break;
   }
   if( iPort>mxPort ){
     if( mnPort==mxPort ){
-      fossil_fatal("unable to open listening socket on ports %d", mnPort);
+      fossil_fatal("unable to open listening socket on port %d", mnPort);
     }else{
       fossil_fatal("unable to open listening socket on any"
                    " port in the range %d..%d", mnPort, mxPort);
@@ -308,8 +593,9 @@ void win32_http_server(
   if( !GetTempPathW(MAX_PATH, zTmpPath) ){
     fossil_fatal("unable to get path to the temporary directory.");
   }
-  zTempPrefix = mprintf("%sfossil_server_P%d_",
+  zTempPrefix = mprintf("%sfossil_server_P%d",
                         fossil_unicode_to_utf8(zTmpPath), iPort);
+  fossil_print("Temporary files: %s*\n", zTempPrefix);
   fossil_print("Listening for %s requests on TCP port %d\n",
                (flags&HTTP_SERVER_SCGI)!=0?"SCGI":"HTTP", iPort);
   if( zBrowser ){
@@ -318,46 +604,78 @@ void win32_http_server(
     fossil_system(zBrowser);
   }
   fossil_print("Type Ctrl-C to stop the HTTP server\n");
+  /* Create an event used to signal when this server is exiting. */
+  hStoppedEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+  assert( hStoppedEvent!=NULL );
+  /* If there is a stopper file name, start the dedicated thread now.
+  ** It will attempt to close the listener socket within 1 second of
+  ** the stopper file being created. */
+  if( zStopper ){
+    HttpServer *pServer = fossil_malloc(sizeof(HttpServer));
+    memset(pServer, 0, sizeof(HttpServer));
+    DuplicateHandle(GetCurrentProcess(), hStoppedEvent,
+                    GetCurrentProcess(), &pServer->hStoppedEvent,
+                    0, FALSE, DUPLICATE_SAME_ACCESS);
+    assert( pServer->hStoppedEvent!=NULL );
+    pServer->zStopper = fossil_strdup(zStopper);
+    pServer->listener = ds;
+    file_delete(zStopper);
+    _beginthread(win32_server_stopper, 0, (void*)pServer);
+  }
   /* Set the service status to running and pass the listener socket to the
   ** service handling procedures. */
-  win32_http_service_running(s);
+  win32_http_service_running(&ds);
   for(;;){
-    SOCKET client;
-    SOCKADDR_IN client_addr;
-    HttpRequest *p;
-    int len = sizeof(client_addr);
+    DualSocket client;
+    DualAddr client_addr;
+    HttpRequest *pRequest;
     int wsaError;
 
-    client = accept(s, (struct sockaddr*)&client_addr, &len);
-    if( client==INVALID_SOCKET ){
+    DualSocket_accept(&ds, &client, &client_addr);
+    if( client.s4==INVALID_SOCKET && client.s6==INVALID_SOCKET ){
       /* If the service control handler has closed the listener socket,
       ** cleanup and return, otherwise report a fatal error. */
       wsaError =  WSAGetLastError();
+      DualSocket_close(&ds);
       if( (wsaError==WSAEINTR) || (wsaError==WSAENOTSOCK) ){
         WSACleanup();
         return;
       }else{
-        closesocket(s);
         WSACleanup();
         fossil_fatal("error from accept()");
       }
-    }else if( zStopper && file_size(zStopper)>=0 ){
-      break;
     }
-    p = fossil_malloc( sizeof(*p) );
-    p->id = ++idCnt;
-    p->s = client;
-    p->addr = client_addr;
-    p->flags = flags;
-    p->zOptions = blob_str(&options);
-    if( flags & HTTP_SERVER_SCGI ){
-      _beginthread(win32_scgi_request, 0, (void*)p);
-    }else{
-      _beginthread(win32_http_request, 0, (void*)p);
+    if( client.s4!=INVALID_SOCKET ){
+      pRequest = fossil_malloc(sizeof(HttpRequest));
+      pRequest->id = ++idCnt;
+      pRequest->s = client.s4;
+      memcpy(&pRequest->addr, &client_addr.a4, sizeof(client_addr.a4));
+      pRequest->flags = flags;
+      pRequest->zOptions = blob_str(&options);
+      if( flags & HTTP_SERVER_SCGI ){
+        _beginthread(win32_scgi_request, 0, (void*)pRequest);
+      }else{
+        _beginthread(win32_http_request, 0, (void*)pRequest);
+      }
+    }
+    if( client.s6!=INVALID_SOCKET ){
+      pRequest = fossil_malloc(sizeof(HttpRequest));
+      pRequest->id = ++idCnt;
+      pRequest->s = client.s6;
+      memcpy(&pRequest->addr, &client_addr.a6, sizeof(client_addr.a6));
+      pRequest->flags = flags;
+      pRequest->zOptions = blob_str(&options);
+      if( flags & HTTP_SERVER_SCGI ){
+        _beginthread(win32_scgi_request, 0, (void*)pRequest);
+      }else{
+        _beginthread(win32_http_request, 0, (void*)pRequest);
+      }
     }
   }
-  closesocket(s);
+  DualSocket_close(&ds);
   WSACleanup();
+  SetEvent(hStoppedEvent);
+  CloseHandle(hStoppedEvent);
 }
 
 /*
@@ -367,18 +685,20 @@ void win32_http_server(
 typedef struct HttpService HttpService;
 struct HttpService {
   int port;                 /* Port on which the http server should run */
+  const char *zBaseUrl;     /* The --baseurl option, or NULL */
   const char *zNotFound;    /* The --notfound option, or NULL */
   const char *zFileGlob;    /* The --files option, or NULL */
   int flags;                /* One or more HTTP_SERVER_ flags */
   int isRunningAsService;   /* Are we running as a service ? */
   const wchar_t *zServiceName;/* Name of the service */
-  SOCKET s;                 /* Socket on which the http server listens */
+  DualSocket s;             /* Sockets on which the http server listens */
 };
 
 /*
 ** Variables used for running as windows service.
 */
-static HttpService hsData = {8080, NULL, NULL, 0, 0, NULL, INVALID_SOCKET};
+static HttpService hsData = {8080, NULL, NULL, NULL, 0, 0, NULL,
+                             {INVALID_SOCKET, INVALID_SOCKET}};
 static SERVICE_STATUS ssStatus;
 static SERVICE_STATUS_HANDLE sshStatusHandle;
 
@@ -469,11 +789,8 @@ static void WINAPI win32_http_service_ctrl(
 ){
   switch( dwCtrlCode ){
     case SERVICE_CONTROL_STOP: {
+      DualSocket_close(&hsData.s);
       win32_report_service_status(SERVICE_STOP_PENDING, NO_ERROR, 0);
-      if( hsData.s != INVALID_SOCKET ){
-        closesocket(hsData.s);
-      }
-      win32_report_service_status(ssStatus.dwCurrentState, NO_ERROR, 0);
       break;
     }
     default: {
@@ -519,8 +836,8 @@ static void WINAPI win32_http_service_main(
 
    /* Execute the http server */
   win32_http_server(hsData.port, hsData.port,
-                    NULL, NULL, hsData.zNotFound, hsData.zFileGlob, 0,
-                    hsData.flags);
+                    NULL, NULL, hsData.zBaseUrl, hsData.zNotFound,
+                    hsData.zFileGlob, 0, hsData.flags);
 
   /* Service has stopped now. */
   win32_report_service_status(SERVICE_STOPPED, NO_ERROR, 0);
@@ -532,9 +849,9 @@ static void WINAPI win32_http_service_main(
 ** listener socket and update the service status. This procedure must be
 ** called from the http server when he is ready to accept connections.
 */
-LOCAL void win32_http_service_running(SOCKET s){
+static void win32_http_service_running(DualSocket *pS){
   if( hsData.isRunningAsService ){
-    hsData.s = s;
+    hsData.s = *pS;
     win32_report_service_status(SERVICE_RUNNING, NO_ERROR, 0);
   }
 }
@@ -547,6 +864,7 @@ LOCAL void win32_http_service_running(SOCKET s){
 */
 int win32_http_service(
   int nPort,                /* TCP port number */
+  const char *zBaseUrl,     /* The --baseurl option, or NULL */
   const char *zNotFound,    /* The --notfound option, or NULL */
   const char *zFileGlob,    /* The --files option, or NULL */
   int flags                 /* One or more HTTP_SERVER_ flags */
@@ -557,9 +875,12 @@ int win32_http_service(
 
   /* Initialize the HttpService structure. */
   hsData.port = nPort;
+  hsData.zBaseUrl = zBaseUrl;
   hsData.zNotFound = zNotFound;
   hsData.zFileGlob = zFileGlob;
   hsData.flags = flags;
+
+  if( GetStdHandle(STD_INPUT_HANDLE)!=NULL ){ return 1; }
 
   /* Try to start the control dispatcher thread for the service. */
   if( !StartServiceCtrlDispatcherW(ServiceTable) ){
@@ -572,9 +893,12 @@ int win32_http_service(
   return 0;
 }
 
-/* dupe ifdef needed for mkindex
+/* Duplicate #ifdef needed for mkindex */
+#ifdef _WIN32
+/*
 ** COMMAND: winsrv*
-** Usage: fossil winsrv METHOD ?SERVICE-NAME? ?OPTIONS?
+**
+** Usage: %fossil winsrv METHOD ?SERVICE-NAME? ?OPTIONS?
 **
 ** Where METHOD is one of: create delete show start stop.
 **
@@ -585,7 +909,7 @@ int win32_http_service(
 ** In the following description of the methods, "Fossil-DSCM" will be
 ** used as the default SERVICE-NAME:
 **
-**    fossil winsrv create ?SERVICE-NAME? ?OPTIONS?
+**    %fossil winsrv create ?SERVICE-NAME? ?OPTIONS?
 **
 **         Creates a service. Available options include:
 **
@@ -617,6 +941,10 @@ int win32_http_service(
 **
 **         The following options are more or less the same as for the "server"
 **         command and influence the behaviour of the http server:
+**
+**         --baseurl URL
+**
+**              Use URL as the base (useful for reverse proxies)
 **
 **         -P|--port TCPPORT
 **
@@ -658,23 +986,23 @@ int win32_http_service(
 **              Create an SCGI server instead of an HTTP server
 **
 **
-**    fossil winsrv delete ?SERVICE-NAME?
+**    %fossil winsrv delete ?SERVICE-NAME?
 **
 **         Deletes a service. If the service is currently running, it will be
 **         stopped first and then deleted.
 **
 **
-**    fossil winsrv show ?SERVICE-NAME?
+**    %fossil winsrv show ?SERVICE-NAME?
 **
 **         Shows how the service is configured and its current state.
 **
 **
-**    fossil winsrv start ?SERVICE-NAME?
+**    %fossil winsrv start ?SERVICE-NAME?
 **
 **         Start the service.
 **
 **
-**    fossil winsrv stop ?SERVICE-NAME?
+**    %fossil winsrv stop ?SERVICE-NAME?
 **
 **         Stop the service.
 **
@@ -700,6 +1028,7 @@ void cmd_win32_service(void){
     SERVICE_DESCRIPTIONW
       svcDescr = {L"Fossil - Distributed Software Configuration Management"};
     DWORD dwStartType = SERVICE_DEMAND_START;
+    const char *zAltBase    = find_option("baseurl", 0, 1);
     const char *zDisplay    = find_option("display", "D", 1);
     const char *zStart      = find_option("start", "S", 1);
     const char *zUsername   = find_option("username", "U", 1);
@@ -745,7 +1074,7 @@ void cmd_win32_service(void){
     }
     if( !zRepository ){
       db_must_be_within_tree();
-    }else if( file_isdir(zRepository)==1 ){
+    }else if( file_isdir(zRepository, ExtFILE)==1 ){
       g.zRepositoryName = mprintf("%s", zRepository);
       file_simplify_name(g.zRepositoryName, -1, 0);
     }else{
@@ -755,6 +1084,7 @@ void cmd_win32_service(void){
     /* Build the fully-qualified path to the service binary file. */
     blob_zero(&binPath);
     blob_appendf(&binPath, "\"%s\" server", g.nameOfExe);
+    if( zAltBase ) blob_appendf(&binPath, " --baseurl %s", zAltBase);
     if( zPort ) blob_appendf(&binPath, " --port %s", zPort);
     if( useSCGI ) blob_appendf(&binPath, " --scgi");
     if( allowRepoList ) blob_appendf(&binPath, " --repolist");
@@ -810,13 +1140,19 @@ void cmd_win32_service(void){
         if( !ControlService(hSvc, SERVICE_CONTROL_STOP, &sstat) ){
           winhttp_fatal("delete", zSvcName, win32_get_last_errmsg());
         }
+        QueryServiceStatus(hSvc, &sstat);
       }
-      while( sstat.dwCurrentState!=SERVICE_STOPPED ){
+      while( sstat.dwCurrentState==SERVICE_STOP_PENDING  ||
+             sstat.dwCurrentState==SERVICE_RUNNING ){
         Sleep(100);
         fossil_print(".");
         QueryServiceStatus(hSvc, &sstat);
       }
-      fossil_print("\nService '%s' stopped.\n", zSvcName);
+      if( sstat.dwCurrentState==SERVICE_STOPPED ){
+        fossil_print("\nService '%s' stopped.\n", zSvcName);
+      }else{
+        winhttp_fatal("delete", zSvcName, win32_get_last_errmsg());
+      }
     }
     if( !DeleteService(hSvc) ){
       if( GetLastError()==ERROR_SERVICE_MARKED_FOR_DELETE ){
@@ -955,17 +1291,23 @@ void cmd_win32_service(void){
     QueryServiceStatus(hSvc, &sstat);
     if( sstat.dwCurrentState!=SERVICE_RUNNING ){
       fossil_print("Starting service '%s'", zSvcName);
-      if( sstat.dwCurrentState!=SERVICE_START_PENDING ){
-        if( !StartServiceW(hSvc, 0, NULL) ){
-          winhttp_fatal("start", zSvcName, win32_get_last_errmsg());
-        }
-      }
-      while( sstat.dwCurrentState!=SERVICE_RUNNING ){
+      if( sstat.dwCurrentState!=SERVICE_START_PENDING ){ 
+        if( !StartServiceW(hSvc, 0, NULL) ){ 
+          winhttp_fatal("start", zSvcName, win32_get_last_errmsg()); 
+        } 
+        QueryServiceStatus(hSvc, &sstat); 
+      } 
+      while( sstat.dwCurrentState==SERVICE_START_PENDING ||
+             sstat.dwCurrentState==SERVICE_STOPPED ){
         Sleep(100);
         fossil_print(".");
         QueryServiceStatus(hSvc, &sstat);
       }
-      fossil_print("\nService '%s' started.\n", zSvcName);
+      if( sstat.dwCurrentState==SERVICE_RUNNING ){
+        fossil_print("\nService '%s' started.\n", zSvcName);
+      }else{
+        winhttp_fatal("start", zSvcName, win32_get_last_errmsg());
+      }
     }else{
       fossil_print("Service '%s' is already started.\n", zSvcName);
     }
@@ -995,13 +1337,19 @@ void cmd_win32_service(void){
         if( !ControlService(hSvc, SERVICE_CONTROL_STOP, &sstat) ){
           winhttp_fatal("stop", zSvcName, win32_get_last_errmsg());
         }
+        QueryServiceStatus(hSvc, &sstat);
       }
-      while( sstat.dwCurrentState!=SERVICE_STOPPED ){
+      while( sstat.dwCurrentState==SERVICE_STOP_PENDING ||
+             sstat.dwCurrentState==SERVICE_RUNNING ){
         Sleep(100);
         fossil_print(".");
         QueryServiceStatus(hSvc, &sstat);
       }
-      fossil_print("\nService '%s' stopped.\n", zSvcName);
+      if( sstat.dwCurrentState==SERVICE_STOPPED ){
+        fossil_print("\nService '%s' stopped.\n", zSvcName);
+      }else{
+        winhttp_fatal("stop", zSvcName, win32_get_last_errmsg());
+      }
     }else{
       fossil_print("Service '%s' is already stopped.\n", zSvcName);
     }
@@ -1014,4 +1362,5 @@ void cmd_win32_service(void){
   }
   return;
 }
-#endif /* _WIN32  -- This code is for win32 only */
+#endif /* _WIN32 -- dupe needed for mkindex */
+#endif /* _WIN32 -- This code is for win32 only */

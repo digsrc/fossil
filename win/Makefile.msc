@@ -94,8 +94,13 @@ FOSSIL_ENABLE_TH1_HOOKS = 0
 FOSSIL_ENABLE_WINXP = 0
 !endif
 
+# Enable support for the SQLite Encryption Extension?
+!ifndef USE_SEE
+USE_SEE = 0
+!endif
+
 !if $(FOSSIL_ENABLE_SSL)!=0
-SSLDIR    = $(B)\compat\openssl-1.0.2d
+SSLDIR    = $(B)\compat\openssl-1.0.2o
 SSLINCDIR = $(SSLDIR)\inc32
 !if $(FOSSIL_DYNAMIC_BUILD)!=0
 SSLLIBDIR = $(SSLDIR)\out32dll
@@ -103,7 +108,7 @@ SSLLIBDIR = $(SSLDIR)\out32dll
 SSLLIBDIR = $(SSLDIR)\out32
 !endif
 SSLLFLAGS = /nologo /opt:ref /debug
-SSLLIB    = ssleay32.lib libeay32.lib user32.lib gdi32.lib
+SSLLIB    = ssleay32.lib libeay32.lib user32.lib gdi32.lib crypt32.lib
 !if "$(PLATFORM)"=="amd64" || "$(PLATFORM)"=="x64"
 !message Using 'x64' platform for OpenSSL...
 # BUGBUG (OpenSSL): Using "no-ssl*" here breaks the build.
@@ -207,7 +212,7 @@ LDFLAGS   = $(LDFLAGS) /NODEFAULTLIB:msvcrt /MANIFEST:NO
 !endif
 
 !if $(FOSSIL_ENABLE_WINXP)!=0
-XPCFLAGS  = $(XPCFLAGS) /D_USING_V110_SDK71_=1
+XPCFLAGS  = $(XPCFLAGS) /D_WIN32_WINNT=0x0501 /D_USING_V110_SDK71_=1
 CFLAGS    = $(CFLAGS) $(XPCFLAGS)
 !if "$(PLATFORM)"=="amd64" || "$(PLATFORM)"=="x64"
 XPLDFLAGS = $(XPLDFLAGS) /SUBSYSTEM:CONSOLE,5.02
@@ -303,24 +308,69 @@ TCC       = $(TCC) /DUSE_TCL_STUBS=1
 RCC       = $(RCC) /DUSE_TCL_STUBS=1
 !endif
 
+!if $(USE_SEE)!=0
+TCC       = $(TCC) /DUSE_SEE=1
+RCC       = $(RCC) /DUSE_SEE=1
+!endif
+
 SQLITE_OPTIONS = /DNDEBUG=1 \
-                 /DSQLITE_OMIT_LOAD_EXTENSION=1 \
-                 /DSQLITE_ENABLE_LOCKING_STYLE=0 \
                  /DSQLITE_THREADSAFE=0 \
-                 /DSQLITE_DEFAULT_FILE_FORMAT=4 \
+                 /DSQLITE_DEFAULT_MEMSTATUS=0 \
+                 /DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 \
+                 /DSQLITE_LIKE_DOESNT_MATCH_BLOBS \
+                 /DSQLITE_OMIT_DECLTYPE \
                  /DSQLITE_OMIT_DEPRECATED \
+                 /DSQLITE_OMIT_GET_TABLE \
+                 /DSQLITE_OMIT_PROGRESS_CALLBACK \
+                 /DSQLITE_OMIT_SHARED_CACHE \
+                 /DSQLITE_OMIT_LOAD_EXTENSION \
+                 /DSQLITE_MAX_EXPR_DEPTH=0 \
+                 /DSQLITE_USE_ALLOCA \
+                 /DSQLITE_ENABLE_LOCKING_STYLE=0 \
+                 /DSQLITE_DEFAULT_FILE_FORMAT=4 \
                  /DSQLITE_ENABLE_EXPLAIN_COMMENTS \
                  /DSQLITE_ENABLE_FTS4 \
                  /DSQLITE_ENABLE_FTS3_PARENTHESIS \
                  /DSQLITE_ENABLE_DBSTAT_VTAB \
                  /DSQLITE_ENABLE_JSON1 \
                  /DSQLITE_ENABLE_FTS5 \
+                 /DSQLITE_ENABLE_STMTVTAB \
+                 /DSQLITE_HAVE_ZLIB \
+                 /DSQLITE_INTROSPECTION_PRAGMAS \
+                 /DSQLITE_ENABLE_DBPAGE_VTAB \
                  /DSQLITE_WIN32_NO_ANSI
 
-SHELL_OPTIONS = /Dmain=sqlite3_shell \
+SHELL_OPTIONS = /DNDEBUG=1 \
+                /DSQLITE_THREADSAFE=0 \
+                /DSQLITE_DEFAULT_MEMSTATUS=0 \
+                /DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 \
+                /DSQLITE_LIKE_DOESNT_MATCH_BLOBS \
+                /DSQLITE_OMIT_DECLTYPE \
+                /DSQLITE_OMIT_DEPRECATED \
+                /DSQLITE_OMIT_GET_TABLE \
+                /DSQLITE_OMIT_PROGRESS_CALLBACK \
+                /DSQLITE_OMIT_SHARED_CACHE \
+                /DSQLITE_OMIT_LOAD_EXTENSION \
+                /DSQLITE_MAX_EXPR_DEPTH=0 \
+                /DSQLITE_USE_ALLOCA \
+                /DSQLITE_ENABLE_LOCKING_STYLE=0 \
+                /DSQLITE_DEFAULT_FILE_FORMAT=4 \
+                /DSQLITE_ENABLE_EXPLAIN_COMMENTS \
+                /DSQLITE_ENABLE_FTS4 \
+                /DSQLITE_ENABLE_FTS3_PARENTHESIS \
+                /DSQLITE_ENABLE_DBSTAT_VTAB \
+                /DSQLITE_ENABLE_JSON1 \
+                /DSQLITE_ENABLE_FTS5 \
+                /DSQLITE_ENABLE_STMTVTAB \
+                /DSQLITE_HAVE_ZLIB \
+                /DSQLITE_INTROSPECTION_PRAGMAS \
+                /DSQLITE_ENABLE_DBPAGE_VTAB \
+                /Dmain=sqlite3_shell \
+                /DSQLITE_SHELL_IS_UTF8=1 \
                 /DSQLITE_OMIT_LOAD_EXTENSION=1 \
                 /DUSE_SYSTEM_SQLITE=$(USE_SYSTEM_SQLITE) \
-                /DSQLITE_SHELL_DBNAME_PROC=fossil_open \
+                /DSQLITE_SHELL_DBNAME_PROC=sqlcmd_get_dbname \
+                /DSQLITE_SHELL_INIT_PROC=sqlcmd_init_proc \
                 /Daccess=file_access \
                 /Dsystem=fossil_system \
                 /Dgetenv=fossil_getenv \
@@ -350,23 +400,28 @@ SRC   = add_.c \
         comformat_.c \
         configure_.c \
         content_.c \
+        cookies_.c \
         db_.c \
         delta_.c \
         deltacmd_.c \
         descendants_.c \
         diff_.c \
         diffcmd_.c \
+        dispatch_.c \
         doc_.c \
         encode_.c \
+        etag_.c \
         event_.c \
         export_.c \
         file_.c \
         finfo_.c \
         foci_.c \
+        fshell_.c \
         fusefs_.c \
         glob_.c \
         graph_.c \
         gzip_.c \
+        hname_.c \
         http_.c \
         http_socket_.c \
         http_ssl_.c \
@@ -415,8 +470,11 @@ SRC   = add_.c \
         rss_.c \
         schema_.c \
         search_.c \
+        security_audit_.c \
         setup_.c \
         sha1_.c \
+        sha1hard_.c \
+        sha3_.c \
         shun_.c \
         sitemap_.c \
         skins_.c \
@@ -434,6 +492,7 @@ SRC   = add_.c \
         tktsetup_.c \
         undo_.c \
         unicode_.c \
+        unversioned_.c \
         update_.c \
         url_.c \
         user_.c \
@@ -451,6 +510,10 @@ SRC   = add_.c \
         zip_.c
 
 EXTRA_FILES   = $(SRCDIR)\../skins/aht/details.txt \
+        $(SRCDIR)\../skins/ardoise/css.txt \
+        $(SRCDIR)\../skins/ardoise/details.txt \
+        $(SRCDIR)\../skins/ardoise/footer.txt \
+        $(SRCDIR)\../skins/ardoise/header.txt \
         $(SRCDIR)\../skins/black_and_white/css.txt \
         $(SRCDIR)\../skins/black_and_white/details.txt \
         $(SRCDIR)\../skins/black_and_white/footer.txt \
@@ -465,6 +528,10 @@ EXTRA_FILES   = $(SRCDIR)\../skins/aht/details.txt \
         $(SRCDIR)\../skins/blitz_no_logo/footer.txt \
         $(SRCDIR)\../skins/blitz_no_logo/header.txt \
         $(SRCDIR)\../skins/blitz_no_logo/ticket.txt \
+        $(SRCDIR)\../skins/bootstrap/css.txt \
+        $(SRCDIR)\../skins/bootstrap/details.txt \
+        $(SRCDIR)\../skins/bootstrap/footer.txt \
+        $(SRCDIR)\../skins/bootstrap/header.txt \
         $(SRCDIR)\../skins/default/css.txt \
         $(SRCDIR)\../skins/default/details.txt \
         $(SRCDIR)\../skins/default/footer.txt \
@@ -497,8 +564,20 @@ EXTRA_FILES   = $(SRCDIR)\../skins/aht/details.txt \
         $(SRCDIR)\../skins/xekri/details.txt \
         $(SRCDIR)\../skins/xekri/footer.txt \
         $(SRCDIR)\../skins/xekri/header.txt \
+        $(SRCDIR)\ci_edit.js \
         $(SRCDIR)\diff.tcl \
-        $(SRCDIR)\markdown.md
+        $(SRCDIR)\graph.js \
+        $(SRCDIR)\href.js \
+        $(SRCDIR)\login.js \
+        $(SRCDIR)\markdown.md \
+        $(SRCDIR)\menu.js \
+        $(SRCDIR)\sbsdiff.js \
+        $(SRCDIR)\scroll.js \
+        $(SRCDIR)\skin.js \
+        $(SRCDIR)\sorttable.js \
+        $(SRCDIR)\tree.js \
+        $(SRCDIR)\useredit.js \
+        $(SRCDIR)\wiki.wiki
 
 OBJ   = $(OX)\add$O \
         $(OX)\allrepo$O \
@@ -520,6 +599,7 @@ OBJ   = $(OX)\add$O \
         $(OX)\comformat$O \
         $(OX)\configure$O \
         $(OX)\content$O \
+        $(OX)\cookies$O \
         $(OX)\cson_amalgamation$O \
         $(OX)\db$O \
         $(OX)\delta$O \
@@ -527,17 +607,21 @@ OBJ   = $(OX)\add$O \
         $(OX)\descendants$O \
         $(OX)\diff$O \
         $(OX)\diffcmd$O \
+        $(OX)\dispatch$O \
         $(OX)\doc$O \
         $(OX)\encode$O \
+        $(OX)\etag$O \
         $(OX)\event$O \
         $(OX)\export$O \
         $(OX)\file$O \
         $(OX)\finfo$O \
         $(OX)\foci$O \
+        $(OX)\fshell$O \
         $(OX)\fusefs$O \
         $(OX)\glob$O \
         $(OX)\graph$O \
         $(OX)\gzip$O \
+        $(OX)\hname$O \
         $(OX)\http$O \
         $(OX)\http_socket$O \
         $(OX)\http_ssl$O \
@@ -586,8 +670,11 @@ OBJ   = $(OX)\add$O \
         $(OX)\rss$O \
         $(OX)\schema$O \
         $(OX)\search$O \
+        $(OX)\security_audit$O \
         $(OX)\setup$O \
         $(OX)\sha1$O \
+        $(OX)\sha1hard$O \
+        $(OX)\sha3$O \
         $(OX)\shell$O \
         $(OX)\shun$O \
         $(OX)\sitemap$O \
@@ -610,6 +697,7 @@ OBJ   = $(OX)\add$O \
         $(OX)\tktsetup$O \
         $(OX)\undo$O \
         $(OX)\unicode$O \
+        $(OX)\unversioned$O \
         $(OX)\update$O \
         $(OX)\url$O \
         $(OX)\user$O \
@@ -700,6 +788,7 @@ $(OX)\linkopts: $B\win\Makefile.msc
 	echo $(OX)\comformat.obj >> $@
 	echo $(OX)\configure.obj >> $@
 	echo $(OX)\content.obj >> $@
+	echo $(OX)\cookies.obj >> $@
 	echo $(OX)\cson_amalgamation.obj >> $@
 	echo $(OX)\db.obj >> $@
 	echo $(OX)\delta.obj >> $@
@@ -707,17 +796,21 @@ $(OX)\linkopts: $B\win\Makefile.msc
 	echo $(OX)\descendants.obj >> $@
 	echo $(OX)\diff.obj >> $@
 	echo $(OX)\diffcmd.obj >> $@
+	echo $(OX)\dispatch.obj >> $@
 	echo $(OX)\doc.obj >> $@
 	echo $(OX)\encode.obj >> $@
+	echo $(OX)\etag.obj >> $@
 	echo $(OX)\event.obj >> $@
 	echo $(OX)\export.obj >> $@
 	echo $(OX)\file.obj >> $@
 	echo $(OX)\finfo.obj >> $@
 	echo $(OX)\foci.obj >> $@
+	echo $(OX)\fshell.obj >> $@
 	echo $(OX)\fusefs.obj >> $@
 	echo $(OX)\glob.obj >> $@
 	echo $(OX)\graph.obj >> $@
 	echo $(OX)\gzip.obj >> $@
+	echo $(OX)\hname.obj >> $@
 	echo $(OX)\http.obj >> $@
 	echo $(OX)\http_socket.obj >> $@
 	echo $(OX)\http_ssl.obj >> $@
@@ -766,8 +859,11 @@ $(OX)\linkopts: $B\win\Makefile.msc
 	echo $(OX)\rss.obj >> $@
 	echo $(OX)\schema.obj >> $@
 	echo $(OX)\search.obj >> $@
+	echo $(OX)\security_audit.obj >> $@
 	echo $(OX)\setup.obj >> $@
 	echo $(OX)\sha1.obj >> $@
+	echo $(OX)\sha1hard.obj >> $@
+	echo $(OX)\sha3.obj >> $@
 	echo $(OX)\shell.obj >> $@
 	echo $(OX)\shun.obj >> $@
 	echo $(OX)\sitemap.obj >> $@
@@ -790,6 +886,7 @@ $(OX)\linkopts: $B\win\Makefile.msc
 	echo $(OX)\tktsetup.obj >> $@
 	echo $(OX)\undo.obj >> $@
 	echo $(OX)\unicode.obj >> $@
+	echo $(OX)\unversioned.obj >> $@
 	echo $(OX)\update.obj >> $@
 	echo $(OX)\url.obj >> $@
 	echo $(OX)\user.obj >> $@
@@ -828,14 +925,27 @@ mkbuiltin$E: $(SRCDIR)\mkbuiltin.c
 mkversion$E: $(SRCDIR)\mkversion.c
 	$(BCC) $**
 
+mkcss$E: $(SRCDIR)\mkcss.c
+	$(BCC) $**
+
 codecheck1$E: $(SRCDIR)\codecheck1.c
 	$(BCC) $**
 
-$(OX)\shell$O : $(SRCDIR)\shell.c $B\win\Makefile.msc
-	$(TCC) /Fo$@ $(SHELL_OPTIONS) $(SQLITE_OPTIONS) $(SHELL_CFLAGS) -c $(SRCDIR)\shell.c
+!if $(USE_SEE)!=0
+SEE_FLAGS = /DSQLITE_HAS_CODEC=1 /DSQLITE_SHELL_DBKEY_PROC=fossil_key
+SQLITE3_SHELL_SRC = $(SRCDIR)\shell-see.c
+SQLITE3_SRC = $(SRCDIR)\sqlite3-see.c
+!else
+SEE_FLAGS =
+SQLITE3_SHELL_SRC = $(SRCDIR)\shell.c
+SQLITE3_SRC = $(SRCDIR)\sqlite3.c
+!endif
 
-$(OX)\sqlite3$O : $(SRCDIR)\sqlite3.c $B\win\Makefile.msc
-	$(TCC) /Fo$@ -c $(SQLITE_OPTIONS) $(SQLITE_CFLAGS) $(SRCDIR)\sqlite3.c
+$(OX)\shell$O : $(SQLITE3_SHELL_SRC) $B\win\Makefile.msc
+	$(TCC) /Fo$@ $(SHELL_OPTIONS) $(SQLITE_OPTIONS) $(SHELL_CFLAGS) $(SEE_FLAGS) -c $(SQLITE3_SHELL_SRC)
+
+$(OX)\sqlite3$O : $(SQLITE3_SRC) $B\win\Makefile.msc
+	$(TCC) /Fo$@ -c $(SQLITE_OPTIONS) $(SQLITE_CFLAGS) $(SEE_FLAGS) $(SQLITE3_SRC)
 
 $(OX)\th$O : $(SRCDIR)\th.c
 	$(TCC) /Fo$@ -c $**
@@ -851,8 +961,12 @@ $(OX)\miniz$O : $(SRCDIR)\miniz.c
 
 VERSION.h : mkversion$E $B\manifest.uuid $B\manifest $B\VERSION
 	$** > $@
+
 $(OX)\cson_amalgamation$O : $(SRCDIR)\cson_amalgamation.c
 	$(TCC) /Fo$@ /c $**
+
+default_css.h: mkcss$E $(SRCDIR)\default_css.txt
+	$** $@
 
 page_index.h: mkindex$E $(SRC)
 	$** > $@
@@ -883,6 +997,8 @@ realclean: clean
 	del makeheaders$P 2>NUL
 	del mkversion$E 2>NUL
 	del mkversion$P 2>NUL
+	del mkcss$E 2>NUL
+	del mkcss$P 2>NUL
 	del codecheck1$E 2>NUL
 	del codecheck1$P 2>NUL
 	del mkbuiltin$E 2>NUL
@@ -1024,6 +1140,12 @@ $(OX)\content$O : content_.c content.h
 content_.c : $(SRCDIR)\content.c
 	translate$E $** > $@
 
+$(OX)\cookies$O : cookies_.c cookies.h
+	$(TCC) /Fo$@ -c cookies_.c
+
+cookies_.c : $(SRCDIR)\cookies.c
+	translate$E $** > $@
+
 $(OX)\db$O : db_.c db.h
 	$(TCC) /Fo$@ -c db_.c
 
@@ -1060,6 +1182,12 @@ $(OX)\diffcmd$O : diffcmd_.c diffcmd.h
 diffcmd_.c : $(SRCDIR)\diffcmd.c
 	translate$E $** > $@
 
+$(OX)\dispatch$O : dispatch_.c dispatch.h
+	$(TCC) /Fo$@ -c dispatch_.c
+
+dispatch_.c : $(SRCDIR)\dispatch.c
+	translate$E $** > $@
+
 $(OX)\doc$O : doc_.c doc.h
 	$(TCC) /Fo$@ -c doc_.c
 
@@ -1070,6 +1198,12 @@ $(OX)\encode$O : encode_.c encode.h
 	$(TCC) /Fo$@ -c encode_.c
 
 encode_.c : $(SRCDIR)\encode.c
+	translate$E $** > $@
+
+$(OX)\etag$O : etag_.c etag.h
+	$(TCC) /Fo$@ -c etag_.c
+
+etag_.c : $(SRCDIR)\etag.c
 	translate$E $** > $@
 
 $(OX)\event$O : event_.c event.h
@@ -1102,6 +1236,12 @@ $(OX)\foci$O : foci_.c foci.h
 foci_.c : $(SRCDIR)\foci.c
 	translate$E $** > $@
 
+$(OX)\fshell$O : fshell_.c fshell.h
+	$(TCC) /Fo$@ -c fshell_.c
+
+fshell_.c : $(SRCDIR)\fshell.c
+	translate$E $** > $@
+
 $(OX)\fusefs$O : fusefs_.c fusefs.h
 	$(TCC) /Fo$@ -c fusefs_.c
 
@@ -1124,6 +1264,12 @@ $(OX)\gzip$O : gzip_.c gzip.h
 	$(TCC) /Fo$@ -c gzip_.c
 
 gzip_.c : $(SRCDIR)\gzip.c
+	translate$E $** > $@
+
+$(OX)\hname$O : hname_.c hname.h
+	$(TCC) /Fo$@ -c hname_.c
+
+hname_.c : $(SRCDIR)\hname.c
 	translate$E $** > $@
 
 $(OX)\http$O : http_.c http.h
@@ -1414,6 +1560,12 @@ $(OX)\search$O : search_.c search.h
 search_.c : $(SRCDIR)\search.c
 	translate$E $** > $@
 
+$(OX)\security_audit$O : security_audit_.c security_audit.h
+	$(TCC) /Fo$@ -c security_audit_.c
+
+security_audit_.c : $(SRCDIR)\security_audit.c
+	translate$E $** > $@
+
 $(OX)\setup$O : setup_.c setup.h
 	$(TCC) /Fo$@ -c setup_.c
 
@@ -1424,6 +1576,18 @@ $(OX)\sha1$O : sha1_.c sha1.h
 	$(TCC) /Fo$@ -c sha1_.c
 
 sha1_.c : $(SRCDIR)\sha1.c
+	translate$E $** > $@
+
+$(OX)\sha1hard$O : sha1hard_.c sha1hard.h
+	$(TCC) /Fo$@ -c sha1hard_.c
+
+sha1hard_.c : $(SRCDIR)\sha1hard.c
+	translate$E $** > $@
+
+$(OX)\sha3$O : sha3_.c sha3.h
+	$(TCC) /Fo$@ -c sha3_.c
+
+sha3_.c : $(SRCDIR)\sha3.c
 	translate$E $** > $@
 
 $(OX)\shun$O : shun_.c shun.h
@@ -1528,6 +1692,12 @@ $(OX)\unicode$O : unicode_.c unicode.h
 unicode_.c : $(SRCDIR)\unicode.c
 	translate$E $** > $@
 
+$(OX)\unversioned$O : unversioned_.c unversioned.h
+	$(TCC) /Fo$@ -c unversioned_.c
+
+unversioned_.c : $(SRCDIR)\unversioned.c
+	translate$E $** > $@
+
 $(OX)\update$O : update_.c update.h
 	$(TCC) /Fo$@ -c update_.c
 
@@ -1621,7 +1791,7 @@ zip_.c : $(SRCDIR)\zip.c
 fossil.res : $B\win\fossil.rc
 	$(RCC)  /fo $@ $**
 
-headers: makeheaders$E page_index.h builtin_data.h VERSION.h
+headers: makeheaders$E page_index.h builtin_data.h default_css.h VERSION.h
 	makeheaders$E add_.c:add.h \
 			allrepo_.c:allrepo.h \
 			attach_.c:attach.h \
@@ -1642,23 +1812,28 @@ headers: makeheaders$E page_index.h builtin_data.h VERSION.h
 			comformat_.c:comformat.h \
 			configure_.c:configure.h \
 			content_.c:content.h \
+			cookies_.c:cookies.h \
 			db_.c:db.h \
 			delta_.c:delta.h \
 			deltacmd_.c:deltacmd.h \
 			descendants_.c:descendants.h \
 			diff_.c:diff.h \
 			diffcmd_.c:diffcmd.h \
+			dispatch_.c:dispatch.h \
 			doc_.c:doc.h \
 			encode_.c:encode.h \
+			etag_.c:etag.h \
 			event_.c:event.h \
 			export_.c:export.h \
 			file_.c:file.h \
 			finfo_.c:finfo.h \
 			foci_.c:foci.h \
+			fshell_.c:fshell.h \
 			fusefs_.c:fusefs.h \
 			glob_.c:glob.h \
 			graph_.c:graph.h \
 			gzip_.c:gzip.h \
+			hname_.c:hname.h \
 			http_.c:http.h \
 			http_socket_.c:http_socket.h \
 			http_ssl_.c:http_ssl.h \
@@ -1707,8 +1882,11 @@ headers: makeheaders$E page_index.h builtin_data.h VERSION.h
 			rss_.c:rss.h \
 			schema_.c:schema.h \
 			search_.c:search.h \
+			security_audit_.c:security_audit.h \
 			setup_.c:setup.h \
 			sha1_.c:sha1.h \
+			sha1hard_.c:sha1hard.h \
+			sha3_.c:sha3.h \
 			shun_.c:shun.h \
 			sitemap_.c:sitemap.h \
 			skins_.c:skins.h \
@@ -1726,6 +1904,7 @@ headers: makeheaders$E page_index.h builtin_data.h VERSION.h
 			tktsetup_.c:tktsetup.h \
 			undo_.c:undo.h \
 			unicode_.c:unicode.h \
+			unversioned_.c:unversioned.h \
 			update_.c:update.h \
 			url_.c:url.h \
 			user_.c:user.h \

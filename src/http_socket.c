@@ -25,16 +25,15 @@
 ** Low-level sockets are abstracted out into this module because they
 ** are handled different on Unix and windows.
 */
-
+#if defined(_WIN32)
+# define _WIN32_WINNT 0x501
+#endif
 #ifndef __EXTENSIONS__
 # define __EXTENSIONS__ 1  /* IPv6 won't compile on Solaris without this */
 #endif
 #include "config.h"
 #include "http_socket.h"
 #if defined(_WIN32)
-#  if !defined(_WIN32_WINNT)
-#    define _WIN32_WINNT 0x0501
-#  endif
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
 #else
@@ -122,6 +121,7 @@ void socket_global_shutdown(void){
 void socket_close(void){
   if( iSocket>=0 ){
 #if defined(_WIN32)
+    if( shutdown(iSocket,1)==0 ) shutdown(iSocket,0);
     closesocket(iSocket);
 #else
     close(iSocket);
@@ -148,8 +148,8 @@ int socket_open(UrlData *pUrlData){
   char zRemote[NI_MAXHOST];
 
   socket_global_init();
+  socket_close();
   memset(&hints, 0, sizeof(struct addrinfo));
-  assert( iSocket<0 );
   hints.ai_family = g.fIPv4 ? AF_INET : AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_protocol = IPPROTO_TCP;

@@ -51,7 +51,7 @@ static sqlite3 *cacheOpen(int bForce){
   zDbName = cacheName();
   if( zDbName==0 ) return 0;
   if( bForce==0 ){
-    sz = file_size(zDbName);
+    sz = file_size(zDbName, ExtFILE);
     if( sz<=0 ){
       fossil_free(zDbName);
       return 0;
@@ -167,13 +167,21 @@ void cache_write(Blob *pContent, const char *zKey){
   rc = sqlite3_changes(db);
 
   /* If the write was successful, truncate the cache to keep at most
-  ** max-cache-entry entries in the cache */
+  ** max-cache-entry entries in the cache.
+  **
+  ** The cache entry replacement algorithm is approximately LRU
+  ** (least recently used).  However, each access of an entry buys
+  ** that entry an extra hour of grace, so that more commonly accessed
+  ** entries are held in cache longer.  The extra "grace" allotted to
+  ** an entry is limited to 2 days worth.
+  */
   if( rc ){
     nKeep = db_get_int("max-cache-entry",10);
     sqlite3_finalize(pStmt);
     pStmt = cacheStmt(db,
                  "DELETE FROM cache WHERE rowid IN ("
-                    "SELECT rowid FROM cache ORDER BY tm DESC"
+                    "SELECT rowid FROM cache"
+                    " ORDER BY (tm + 3600*min(nRef,48)) DESC"
                     " LIMIT -1 OFFSET ?1)");
     if( pStmt ){
       sqlite3_bind_int(pStmt, 1, nKeep);
@@ -239,6 +247,7 @@ void cache_initialize(void){
 
 /*
 ** COMMAND: cache*
+**
 ** Usage: %fossil cache SUBCOMMAND
 **
 ** Manage the cache used for potentially expensive web pages such as
@@ -246,15 +255,15 @@ void cache_initialize(void){
 **
 **    clear        Remove all entries from the cache.
 **
-**    init         Create the cache file if it does not already exists.
+**    init         Create the cache file if it does not already exist.
 **
 **    list|ls      List the keys and content sizes and other stats for
-**                 all entries currently in the cache
+**                 all entries currently in the cache.
 **
-**    status       Show a summary of cache status.
+**    status       Show a summary of the cache status.
 **
 ** The cache is stored in a file that is distinct from the repository
-** but that is held in the same directory as the repository.  To cache
+** but that is held in the same directory as the repository.  The cache
 ** file can be deleted in order to completely disable the cache.
 */
 void cache_cmd(void){
@@ -292,7 +301,8 @@ void cache_cmd(void){
     }else{
       fossil_print("nothing to clear; cache does not exist\n");
     }
-  }else if(( strncmp(zCmd, "list", nCmd)==0 ) || ( strncmp(zCmd, "ls", nCmd)==0 )){
+  }else if(( strncmp(zCmd, "list", nCmd)==0 )
+             || ( strncmp(zCmd, "ls", nCmd)==0 )){
     db = cacheOpen(0);
     if( db==0 ){
       fossil_print("cache does not exist\n");
@@ -318,7 +328,7 @@ void cache_cmd(void){
       }
       sqlite3_close(db);
       fossil_print("Entries: %d  Cache-file Size: %lld\n",
-                   nEntry, file_size(zDbName));
+                   nEntry, file_size(zDbName, ExtFILE));
       fossil_free(zDbName);
     }
   }else if( strncmp(zCmd, "status", nCmd)==0 ){
@@ -351,13 +361,13 @@ void cache_page(void){
     pStmt = cacheStmt(db,
          "SELECT key, sizename(sz), nRef, datetime(tm,'unixepoch')"
          "  FROM cache"
-         " ORDER BY tm DESC"
+         " ORDER BY (tm + 3600*min(nRef,48)) DESC"
     );
     if( pStmt ){
       @ <ol>
       while( sqlite3_step(pStmt)==SQLITE_ROW ){
         const unsigned char *zName = sqlite3_column_text(pStmt,0);
-        @ <li><p>%z(href("%R/cacheget?key=%T",zName))%h(zName)</a><br>
+        @ <li><p>%z(href("%R/cacheget?key=%T",zName))%h(zName)</a><br />
         @ size: %s(sqlite3_column_text(pStmt,1))
         @ hit-count: %d(sqlite3_column_int(pStmt,2))
         @ last-access: %s(sqlite3_column_text(pStmt,3))</p></li>
@@ -366,7 +376,7 @@ void cache_page(void){
       @ </ol>
     }
     zDbName = cacheName();
-    bigSizeName(sizeof(zBuf), zBuf, file_size(zDbName));
+    bigSizeName(sizeof(zBuf), zBuf, file_size(zDbName, ExtFILE));
     @ <p>cache-file name: %h(zDbName)</p>
     @ <p>cache-file size: %s(zBuf)</p>
     fossil_free(zDbName);

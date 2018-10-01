@@ -85,6 +85,8 @@ repertoire of commands.  TH1, as it is designed to be minimalist and
 embedded has a greatly reduced command set.  The following bullets
 summarize the commands available in TH1:
 
+  *  array exists VARNAME
+  *  array names VARNAME
   *  break
   *  catch SCRIPT ?VARIABLE?
   *  continue
@@ -105,6 +107,7 @@ summarize the commands available in TH1:
   *  set VARNAME VALUE
   *  string compare STR1 STR2
   *  string first NEEDLE HAYSTACK ?START-INDEX?
+  *  string index STRING INDEX
   *  string is CLASS STRING
   *  string last NEEDLE HAYSTACK ?START-INDEX?
   *  string length STRING
@@ -114,9 +117,16 @@ summarize the commands available in TH1:
   *  uplevel ?LEVEL? SCRIPT
   *  upvar ?FRAME? OTHERVAR MYVAR ?OTHERVAR MYVAR?
 
-All of the above commands works as in the original Tcl.  Refer to the
+All of the above commands work as in the original Tcl.  Refer to the
 <a href="https://www.tcl-lang.org/man/tcl/contents.htm">Tcl documentation</a>
 for details.
+
+Summary of Core TH1 Variables
+-----------------------------
+
+  *  tcl\_platform(engine) -- _This will always have the value "TH1"._
+  *  tcl\_platform(platform) -- _This will have the value "windows" or "unix"._
+  *  th\_stack\_trace -- _This will contain error stack information._
 
 TH1 Extended Commands
 ---------------------
@@ -132,10 +142,10 @@ features of Fossil.  The following is a summary of the extended commands:
   *  date
   *  decorate
   *  dir
-  *  enable_output
+  *  enable\_output
   *  encode64
   *  getParameter
-  *  glob_match
+  *  glob\_match
   *  globalState
   *  hascap
   *  hasfeature
@@ -143,11 +153,13 @@ features of Fossil.  The following is a summary of the extended commands:
   *  htmlize
   *  http
   *  httpize
+  *  insertCsrf
   *  linecount
   *  markdown
   *  puts
   *  query
   *  randhex
+  *  redirect
   *  regexp
   *  reinitialize
   *  render
@@ -155,6 +167,7 @@ features of Fossil.  The following is a summary of the extended commands:
   *  searchable
   *  setParameter
   *  setting
+  *  stime
   *  styleHeader
   *  styleFooter
   *  tclEval
@@ -164,8 +177,10 @@ features of Fossil.  The following is a summary of the extended commands:
   *  tclMakeSafe
   *  tclReady
   *  trace
-  *  stime
+  *  unversioned content
+  *  unversioned list
   *  utime
+  *  verifyCsrf
   *  wiki
 
 Each of the commands above is documented by a block comment above their
@@ -239,7 +254,7 @@ Renders STRING as wiki content; however, only links are handled.  No
 other markup is processed.
 
 <a name="dir"></a>TH1 dir Command
--------------------------------------------
+---------------------------------
 
   * dir CHECKIN ?GLOB? ?DETAILS?
 
@@ -250,10 +265,10 @@ element containing at least three elements: the file name, the file
 size (in bytes), and the file last modification time (relative to the
 time zone configured for the repository).
 
-<a name="enable_output"></a>TH1 enable_output Command
------------------------------------------------------
+<a name="enable_output"></a>TH1 enable\_output Command
+------------------------------------------------------
 
-  *  enable_output BOOLEAN
+  *  enable\_output BOOLEAN
 
 Enable or disable sending output when the combobox, puts, or wiki
 commands are used.
@@ -273,10 +288,10 @@ Encode the specified string using Base64 and return the result.
 Returns the value of the specified query parameter or the specified
 default value when there is no matching query parameter.
 
-<a name="glob_match"></a>TH1 glob_match Command
------------------------------------------------
+<a name="glob_match"></a>TH1 glob\_match Command
+------------------------------------------------
 
-  *  glob_match ?-one? ?--? patternList string
+  *  glob\_match ?-one? ?--? patternList string
 
 Checks the string against the specified glob pattern -OR- list of glob
 patterns and returns non-zero if there is a match.
@@ -332,6 +347,8 @@ The possible features are:
   1. **markdown** -- _Support for Markdown documentation format._
   1. **unicodeCmdLine** -- _The command line arguments are Unicode._
   1. **dynamicBuild** -- _Dynamically linked to libraries._
+  1. **mman** -- _Uses POSIX memory APIs from "sys/mman.h"._
+  1. **see** -- _Uses the SQLite Encryption Extension._
 
 Specifying an unknown feature will return a value of false, it will not
 raise a script error.
@@ -372,6 +389,14 @@ are not currently implemented.
 Escape all characters of STRING which have special meaning in URI
 components.  Returns the escaped string.
 
+<a name="insertCsrf"></a>TH1 insertCsrf Command
+-----------------------------------------------
+
+  *  insertCsrf
+
+While rendering a form, call this command to add the Anti-CSRF token
+as a hidden element of the form.
+
 <a name="linecount"></a>TH1 linecount Command
 ---------------------------------------------
 
@@ -381,7 +406,7 @@ Returns one more than the number of \n characters in STRING.  But
 never returns less than MIN or more than MAX.
 
 <a name="markdown"></a>TH1 markdown Command
----------------------------------------------
+-------------------------------------------
 
   *  markdown STRING
 
@@ -399,7 +424,7 @@ Outputs the STRING unchanged.
 <a name="query"></a>TH1 query Command
 -------------------------------------
 
-  *  query SQL CODE
+  *  query ?-nocomplain? SQL CODE
 
 Runs the SQL query given by the SQL argument.  For each row in the result
 set, run CODE.
@@ -415,6 +440,18 @@ to each invocation of CODE.
 
 Returns a string of N*2 random hexadecimal digits with N<50.  If N is
 omitted, use a value of 10.
+
+<a name="redirect"></a>TH1 redirect Command
+-------------------------------------------
+
+  *  redirect URL ?withMethod?
+
+Issues an HTTP redirect to the specified URL and then exits the process.
+By default, an HTTP status code of 302 is used.  If the optional withMethod
+argument is present and non-zero, an HTTP status code of 307 is used, which
+should force the user agent to preserve the original method for the request
+(e.g. GET, POST) instead of (possibly) forcing the user agent to change the
+method to GET.
 
 <a name="regexp"></a>TH1 regexp Command
 ---------------------------------------
@@ -491,6 +528,14 @@ Sets the value of the specified query parameter.
 
 Gets and returns the value of the specified setting.
 
+<a name="stime"></a>TH1 stime Command
+-------------------------------------
+
+  *  stime
+
+Returns the number of microseconds of CPU time consumed by the current
+process in system space.
+
 <a name="styleHeader"></a>TH1 styleHeader Command
 -------------------------------------------------
 
@@ -550,7 +595,7 @@ Returns non-zero if the Tcl interpreter is "safe".  The Tcl interpreter
 will be created automatically if it has not been already.
 
 <a name="tclMakeSafe"></a>TH1 tclMakeSafe Command
----------------------------------------------
+-------------------------------------------------
 
 **This command requires the Tcl integration feature.**
 
@@ -576,13 +621,22 @@ is currently available for use by TH1 scripts.
 
 Generates a TH1 trace message if TH1 tracing is enabled.
 
-<a name="stime"></a>TH1 stime Command
--------------------------------------
+<a name="unversioned_content"></a>TH1 unversioned content Command
+-----------------------------------------------------------------
 
-  *  stime
+  *  unversioned content FILENAME
 
-Returns the number of microseconds of CPU time consumed by the current
-process in system space.
+Attempts to locate the specified unversioned file and return its contents.
+An error is generated if the repository is not open or the unversioned file
+cannot be found.
+
+<a name="unversioned_list"></a>TH1 unversioned list Command
+-----------------------------------------------------------
+
+  *  unversioned list
+
+Returns a list of the names of all unversioned files held in the local
+repository.  An error is generated if the repository is not open.
 
 <a name="utime"></a>TH1 utime Command
 -------------------------------------
@@ -591,6 +645,17 @@ process in system space.
 
 Returns the number of microseconds of CPU time consumed by the current
 process in user space.
+
+<a name="verifyCsrf"></a>TH1 verifyCsrf Command
+-----------------------------------------------
+
+  *  verifyCsrf
+
+Before using the results of a form, first call this command to verify
+that this Anti-CSRF token is present and is valid.  If the Anti-CSRF token
+is missing or is incorrect, that indicates a cross-site scripting attack.
+If the event of an attack is detected, an error message is generated and
+all further processing is aborted.
 
 <a name="wiki"></a>TH1 wiki Command
 -----------------------------------
@@ -629,13 +694,3 @@ error is generated, it will be transformed into a Tcl script error.
 
 Evaluates the TH1 expression and returns its result verbatim.  If a TH1
 script error is generated, it will be transformed into a Tcl script error.
-
-Further Notes
--------------
-
-**To Do:** We would like to have a community volunteer go through and
-copy the documentation for each of these commands (with appropriate
-format changes and spelling and grammar corrections) into subsequent
-sections of this document. It is suggested that the list of extension
-commands be left intact - as a quick reference.  But it would be really
-nice to also have the details of what each command does.

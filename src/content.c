@@ -4,7 +4,7 @@
 ** This program is free software; you can redistribute it and/or
 ** modify it under the terms of the Simplified BSD License (also
 ** known as the "2-Clause License" or "FreeBSD License".)
-
+**
 ** This program is distributed in the hope that it will be useful,
 ** but without any warranty; without even the implied warranty of
 ** merchantability or fitness for a particular purpose.
@@ -119,7 +119,7 @@ void content_clear_cache(void){
 ** Return the srcid associated with rid.  Or return 0 if rid is
 ** original content and not a delta.
 */
-static int findSrcid(int rid){
+int delta_source_rid(int rid){
   static Stmt q;
   int srcid;
   db_static_prepare(&q, "SELECT srcid FROM delta WHERE rid=:rid");
@@ -167,7 +167,7 @@ int content_is_available(int rid){
       bag_insert(&contentCache.missing, rid);
       return 0;
     }
-    srcid = findSrcid(rid);
+    srcid = delta_source_rid(rid);
     if( srcid==0 ){
       bag_insert(&contentCache.available, rid);
       return 1;
@@ -252,7 +252,7 @@ int content_get(int rid, Blob *pBlob){
     }
   }
 
-  nextRid = findSrcid(rid);
+  nextRid = delta_source_rid(rid);
   if( nextRid==0 ){
     rc = content_of_blob(rid, pBlob);
   }else{
@@ -267,7 +267,7 @@ int content_get(int rid, Blob *pBlob){
     a[1] = nextRid;
     n = 1;
     while( !bag_find(&contentCache.inCache, nextRid)
-        && (nextRid = findSrcid(nextRid))>0 ){
+        && (nextRid = delta_source_rid(nextRid))>0 ){
       n++;
       if( n>=nAlloc ){
         if( n>db_int(0, "SELECT max(rid) FROM blob") ){
@@ -284,14 +284,17 @@ int content_get(int rid, Blob *pBlob){
     while( rc && n>=0 ){
       rc = content_of_blob(a[n], &delta);
       if( rc ){
-        blob_delta_apply(pBlob, &delta, &next);
-        blob_reset(&delta);
-        if( (mx-n)%8==0 ){
-          content_cache_insert(a[n+1], pBlob);
+        if( blob_delta_apply(pBlob, &delta, &next)<0 ){
+          rc = 1;
         }else{
-          blob_reset(pBlob);
+          blob_reset(&delta);
+          if( (mx-n)%8==0 ){
+            content_cache_insert(a[n+1], pBlob);
+          }else{
+            blob_reset(pBlob);
+          }
+          *pBlob = next;
         }
-        *pBlob = next;
       }
       n--;
     }
@@ -311,7 +314,7 @@ int content_get(int rid, Blob *pBlob){
 **
 ** Usage: %fossil artifact ARTIFACT-ID ?OUTPUT-FILENAME? ?OPTIONS?
 **
-** Extract an artifact by its SHA1 hash and write the results on
+** Extract an artifact by its artifact hash and write the results on
 ** standard output, or if the optional 4th argument is given, in
 ** the named output file.
 **
@@ -336,7 +339,7 @@ void artifact_cmd(void){
 }
 
 /*
-** COMMAND:  test-content-rawget
+** COMMAND: test-content-rawget
 **
 ** Extract a blob from the database and write it into a file.  This
 ** version does not expand the delta.
@@ -453,6 +456,26 @@ void content_enable_dephantomize(int onoff){
 }
 
 /*
+** Make sure the g.rcvid global variable has been initialized.
+**
+** If the g.zIpAddr variable has not been set when this routine is
+** called, use zSrc as the source of content for the rcvfrom
+** table entry.
+*/
+void content_rcvid_init(const char *zSrc){
+  if( g.rcvid==0 ){
+    user_select();
+    if( g.zIpAddr ) zSrc = g.zIpAddr;
+    db_multi_exec(
+       "INSERT INTO rcvfrom(uid, mtime, nonce, ipaddr)"
+       "VALUES(%d, julianday('now'), %Q, %Q)",
+       g.userUid, g.zNonce, zSrc
+    );
+    g.rcvid = db_last_insert_rowid();
+  }
+}
+
+/*
 ** Write content into the database.  Return the record ID.  If the
 ** content is already in the database, just return the record ID.
 **
@@ -476,7 +499,7 @@ void content_enable_dephantomize(int onoff){
 */
 int content_put_ex(
   Blob *pBlob,              /* Content to add to the repository */
-  const char *zUuid,        /* SHA1 hash of reconstructed pBlob */
+  const char *zUuid,        /* artifact hash of reconstructed pBlob */
   int srcId,                /* pBlob is a delta from this entry */
   int nBlob,                /* pBlob is compressed. Original size is this */
   int isPrivate             /* The content should be marked private */
@@ -492,11 +515,25 @@ int content_put_ex(
   assert( g.repositoryOpen );
   assert( pBlob!=0 );
   assert( srcId==0 || zUuid!=0 );
+  db_begin_transaction();
   if( zUuid==0 ){
     assert( nBlob==0 );
-    sha1sum_blob(pBlob, &hash);
+    /* First check the auxiliary hash to see if there is already an artifact
+    ** that uses the auxiliary hash name */
+    hname_hash(pBlob, 1, &hash);
+    rid = fast_uuid_to_rid(blob_str(&hash));
+    if( rid==0 ){
+      /* No existing artifact with the auxiliary hash name.  Therefore, use
+      ** the primary hash name. */
+      blob_reset(&hash);
+      hname_hash(pBlob, 0, &hash);
+    }
   }else{
     blob_init(&hash, zUuid, -1);
+  }
+  if( g.eHashPolicy==HPOLICY_AUTO && blob_size(&hash)>HNAME_LEN_SHA1 ){
+    g.eHashPolicy = HPOLICY_SHA3;
+    db_set_int("hash-policy", HPOLICY_SHA3, 0);
   }
   if( nBlob ){
     size = nBlob;
@@ -506,7 +543,6 @@ int content_put_ex(
       size = delta_output_size(blob_buffer(pBlob), size);
     }
   }
-  db_begin_transaction();
 
   /* Check to see if the entry already exists and if it does whether
   ** or not the entry is a phantom
@@ -529,14 +565,7 @@ int content_put_ex(
   db_finalize(&s1);
 
   /* Construct a received-from ID if we do not already have one */
-  if( g.rcvid==0 ){
-    db_multi_exec(
-       "INSERT INTO rcvfrom(uid, mtime, nonce, ipaddr)"
-       "VALUES(%d, julianday('now'), %Q, %Q)",
-       g.userUid, g.zNonce, g.zIpAddr
-    );
-    g.rcvid = db_last_insert_rowid();
-  }
+  content_rcvid_init(0);
 
   if( nBlob ){
     cmpr = pBlob[0];
@@ -665,7 +694,7 @@ int content_new(const char *zUuid, int isPrivate){
 
 
 /*
-** COMMAND:  test-content-put
+** COMMAND: test-content-put
 **
 ** Usage: %fossil test-content-put FILE
 **
@@ -678,7 +707,7 @@ void test_content_put_cmd(void){
   if( g.argc!=3 ) usage("FILENAME");
   db_must_be_within_tree();
   user_select();
-  blob_read_from_file(&content, g.argv[2]);
+  blob_read_from_file(&content, g.argv[2], ExtFILE);
   rid = content_put(&content);
   fossil_print("inserted as record %d\n", rid);
 }
@@ -688,7 +717,7 @@ void test_content_put_cmd(void){
 ** delta.
 */
 void content_undelta(int rid){
-  if( findSrcid(rid)>0 ){
+  if( delta_source_rid(rid)>0 ){
     Blob x;
     if( content_get(rid, &x) ){
       Stmt s;
@@ -705,13 +734,13 @@ void content_undelta(int rid){
 }
 
 /*
-** COMMAND:  test-content-undelta
+** COMMAND: test-content-undelta
 **
 ** Make sure the content at RECORDID is not a delta
 */
 void test_content_undelta_cmd(void){
   int rid;
-  if( g.argc!=2 ) usage("RECORDID");
+  if( g.argc!=3 ) usage("RECORDID");
   db_must_be_within_tree();
   rid = atoi(g.argv[2]);
   content_undelta(rid);
@@ -745,10 +774,13 @@ void content_make_public(int rid){
 }
 
 /*
-** Change the storage of rid so that it is a delta of srcid.
+** Try to change the storage of rid so that it is a delta from one
+** of the artifacts given in aSrc[0]..aSrc[nSrc-1].  The aSrc[*] that
+** gives the smallest delta is choosen.
 **
 ** If rid is already a delta from some other place then no
-** conversion occurs and this is a no-op unless force==1.
+** conversion occurs and this is a no-op unless force==1.  If force==1,
+** then nSrc must also be 1.
 **
 ** Never generate a delta that carries a private artifact into a public
 ** artifact.  Otherwise, when we go to send the public artifact on a
@@ -756,50 +788,90 @@ void content_make_public(int rid){
 ** the source of the delta.  It is OK to delta private->private and
 ** public->private and public->public.  Just no private->public delta.
 **
-** If srcid is a delta that depends on rid, then srcid is
-** converted to undeltaed text.
+** If aSrc[bestSrc] is already a dleta that depends on rid, then it is
+** converted to undeltaed text before the aSrc[bestSrc]->rid delta is
+** created, in order to prevent a delta loop.
 **
-** If either rid or srcid contain less than 50 bytes, or if the
+** If either rid or aSrc[i] contain less than 50 bytes, or if the
 ** resulting delta does not achieve a compression of at least 25%
 ** the rid is left untouched.
 **
 ** Return 1 if a delta is made and 0 if no delta occurs.
 */
-int content_deltify(int rid, int srcid, int force){
+int content_deltify(int rid, int *aSrc, int nSrc, int force){
   int s;
-  Blob data, src, delta;
-  Stmt s1, s2;
-  int rc = 0;
+  Blob data;           /* Content of rid */
+  Blob src;            /* Content of aSrc[i] */
+  Blob delta;          /* Delta from aSrc[i] to rid */
+  Blob bestDelta;      /* Best delta seen so far */
+  int bestSrc = 0;     /* Which aSrc is the source of the best delta */
+  int rc = 0;          /* Value to return */
+  int i;               /* Loop variable for aSrc[] */
 
-  if( srcid==rid ) return 0;
-  if( !force && findSrcid(rid)>0 ) return 0;
-  if( content_is_private(srcid) && !content_is_private(rid) ){
-    return 0;
-  }
-  s = srcid;
-  while( (s = findSrcid(s))>0 ){
-    if( s==rid ){
-      content_undelta(srcid);
-      break;
-    }
-  }
-  content_get(srcid, &src);
-  if( blob_size(&src)<50 ){
-    blob_reset(&src);
-    return 0;
-  }
+  /* If rid is already a child (a delta) of some other artifact, return
+  ** immediately if the force flags is false
+  */
+  if( !force && delta_source_rid(rid)>0 ) return 0;
+
+  /* Get the complete content of the object to be delta-ed.  If the size
+  ** is less than 50 bytes, then there really is no point in trying to do
+  ** a delta, so return immediately
+  */
   content_get(rid, &data);
   if( blob_size(&data)<50 ){
-    blob_reset(&src);
+    /* Do not try to create a delta for objects smaller than 50 bytes */
     blob_reset(&data);
     return 0;
   }
-  blob_delta_create(&src, &data, &delta);
-  if( blob_size(&delta) <= blob_size(&data)*0.75 ){
-    blob_compress(&delta, &delta);
+  blob_init(&bestDelta, 0, 0);
+
+  /* Loop over all candidate delta sources */
+  for(i=0; i<nSrc; i++){
+    int srcid = aSrc[i];
+    if( srcid==rid ) continue;
+    if( content_is_private(srcid) && !content_is_private(rid) ) continue;
+
+    /* Compute all ancestors of srcid and make sure rid is not one of them.
+    ** If rid is an ancestor of srcid, then making rid a decendent of srcid
+    ** would create a delta loop. */
+    s = srcid;
+    while( (s = delta_source_rid(s))>0 ){
+      if( s==rid ){
+        content_undelta(srcid);
+        break;
+      }
+    }
+    if( s!=0 ) continue;
+
+    content_get(srcid, &src);
+    if( blob_size(&src)<50 ){
+      /* The source is smaller then 50 bytes, so don't bother trying to use it*/
+      blob_reset(&src);
+      continue;
+    }
+    blob_delta_create(&src, &data, &delta);
+    if( blob_size(&delta) < blob_size(&data)*0.75
+     && (bestSrc<=0 || blob_size(&delta)<blob_size(&bestDelta))
+    ){
+      /* This is the best delta seen so far.  Remember it */
+      blob_reset(&bestDelta);
+      bestDelta = delta;
+      bestSrc = srcid;
+    }else{
+      /* This delta is not a candidate for becoming the new parent of rid */
+      blob_reset(&delta);
+    }
+    blob_reset(&src);
+  }
+
+  /* If there is a winning candidate for the new parent of rid, then
+  ** make that candidate the new parent now */
+  if( bestSrc>0 ){
+    Stmt s1, s2;  /* Statements used to create the delta */
+    blob_compress(&bestDelta, &bestDelta);
     db_prepare(&s1, "UPDATE blob SET content=:data WHERE rid=%d", rid);
-    db_prepare(&s2, "REPLACE INTO delta(rid,srcid)VALUES(%d,%d)", rid, srcid);
-    db_bind_blob(&s1, ":data", &delta);
+    db_prepare(&s2, "REPLACE INTO delta(rid,srcid)VALUES(%d,%d)", rid, bestSrc);
+    db_bind_blob(&s1, ":data", &bestDelta);
     db_begin_transaction();
     db_exec(&s1);
     db_exec(&s2);
@@ -809,21 +881,29 @@ int content_deltify(int rid, int srcid, int force){
     verify_before_commit(rid);
     rc = 1;
   }
-  blob_reset(&src);
   blob_reset(&data);
-  blob_reset(&delta);
+  blob_reset(&bestDelta);
   return rc;
 }
 
 /*
-** COMMAND:  test-content-deltify
+** COMMAND: test-content-deltify
 **
-** Convert the content at RID into a delta from SRCID.
+** Usage:  %fossil RID SRCID SRCID ...  [-force]
+**
+** Convert the content at RID into a delta one of the from SRCIDs.
 */
 void test_content_deltify_cmd(void){
-  if( g.argc!=5 ) usage("RID SRCID FORCE");
+  int nSrc;
+  int *aSrc;
+  int i;
+  int bForce = find_option("force",0,0)!=0;
+  if( g.argc<3 ) usage("[--force] RID SRCID SRCID...");
+  aSrc = fossil_malloc( (g.argc-2)*sizeof(aSrc[0]) );
+  nSrc = 0;
+  for(i=2; i<g.argc; i++) aSrc[nSrc++] = atoi(g.argv[i]);
   db_must_be_within_tree();
-  content_deltify(atoi(g.argv[2]), atoi(g.argv[3]), atoi(g.argv[4]));
+  content_deltify(atoi(g.argv[2]), aSrc, nSrc, bForce);
 }
 
 /*
@@ -840,7 +920,7 @@ static int looks_like_control_artifact(Blob *p){
 }
 
 /*
-** COMMAND: test-integrity ?OPTIONS?
+** COMMAND: test-integrity
 **
 ** Verify that all content can be extracted from the BLOB table correctly.
 ** If the BLOB table is correct, then the repository can always be
@@ -854,7 +934,6 @@ static int looks_like_control_artifact(Blob *p){
 void test_integrity(void){
   Stmt q;
   Blob content;
-  Blob cksum;
   int n1 = 0;
   int n2 = 0;
   int nErr = 0;
@@ -891,6 +970,7 @@ void test_integrity(void){
   while( db_step(&q)==SQLITE_ROW ){
     int rid = db_column_int(&q, 0);
     const char *zUuid = db_column_text(&q, 1);
+    int nUuid = db_column_bytes(&q, 1);
     int size = db_column_int(&q, 2);
     n1++;
     fossil_print("  %d/%d\r", n1, total);
@@ -905,10 +985,8 @@ void test_integrity(void){
                      rid, size, blob_size(&content));
       nErr++;
     }
-    sha1sum_blob(&content, &cksum);
-    if( fossil_strcmp(blob_str(&cksum), zUuid)!=0 ){
-      fossil_print("checksum mismatch on artifact %d: wanted %s but got %s\n",
-                   rid, zUuid, blob_str(&cksum));
+    if( !hname_verify_hash(&content, zUuid, nUuid) ){
+      fossil_print("wrong hash on artifact %d\n",rid);
       nErr++;
     }
     if( bParse && looks_like_control_artifact(&content) ){
@@ -927,7 +1005,7 @@ void test_integrity(void){
       p = manifest_parse(&content, 0, &err);
       if( p==0 ){
         fossil_print("manifest_parse failed for %s:\n%s\n",
-               blob_str(&cksum), blob_str(&err));
+               zUuid, blob_str(&err));
         if( strncmp(blob_str(&err), "line 1:", 7)==0 ){
           fossil_print("\"%s\"\n", zFirstLine);
         }
@@ -940,7 +1018,6 @@ void test_integrity(void){
     }else{
       blob_reset(&content);
     }
-    blob_reset(&cksum);
     n2++;
   }
   db_finalize(&q);
@@ -955,12 +1032,14 @@ void test_integrity(void){
       if( anCA[i] ) fossil_print("  %d %ss\n", anCA[i], azType[i]);
     }
   }
+  fossil_print("low-level database integrity-check: ");
+  fossil_print("%s\n", db_text(0, "PRAGMA integrity_check(10)"));
 }
 
 /*
 ** COMMAND: test-orphans
 **
-** Search the repository for orphaned artifacts
+** Search the repository for orphaned artifacts.
 */
 void test_orphans(void){
   Stmt q;
@@ -1125,4 +1204,51 @@ void test_missing(void){
     fossil_print("%d missing or shunned references in %d control artifacts\n",
                  nErr, nArtifact);
   }
+}
+
+/*
+** COMMAND: test-content-erase
+**
+** Usage: %fossil test-content-erase RID ....
+**
+** Remove all traces of one or more artifacts from the local repository.
+**
+** WARNING: This command destroys data and can cause you to lose work.
+** Make sure you have a backup copy before using this command!
+**
+** WARNING: You must run "fossil rebuild" after this command to rebuild
+** the metadata.
+**
+** Note that the arguments are the integer raw RID values from the BLOB table,
+** not artifact hashs or labels.
+*/
+void test_content_erase(void){
+  int i;
+  Blob x;
+  char c;
+  Stmt q;
+  prompt_user("This command erases information from the repository and\n"
+              "might irrecoverably damage the repository.  Make sure you\n"
+              "have a backup copy!\n"
+              "Continue? (y/N)? ", &x);
+  c = blob_str(&x)[0];
+  blob_reset(&x);
+  if( c!='y' && c!='Y' ) return;
+  db_find_and_open_repository(OPEN_ANY_SCHEMA, 0);
+  db_begin_transaction();
+  db_prepare(&q, "SELECT rid FROM delta WHERE srcid=:rid");
+  for(i=2; i<g.argc; i++){
+    int rid = atoi(g.argv[i]);
+    fossil_print("Erasing artifact %d (%s)\n",
+                 rid, db_text("", "SELECT uuid FROM blob WHERE rid=%d", rid));
+    db_bind_int(&q, ":rid", rid);
+    while( db_step(&q)==SQLITE_ROW ){
+      content_undelta(db_column_int(&q,0));
+    }
+    db_reset(&q);
+    db_multi_exec("DELETE FROM blob WHERE rid=%d", rid);
+    db_multi_exec("DELETE FROM delta WHERE rid=%d", rid);
+  }
+  db_finalize(&q);
+  db_end_transaction(0);
 }

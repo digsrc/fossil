@@ -47,7 +47,6 @@ static struct {
   Bag seen;             /* Nodes seen before */
   int nStep;            /* Number of steps from first to last */
   PathNode *pStart;     /* Earliest node */
-  PathNode *pPivot;     /* Common ancestor of pStart and pEnd */
   PathNode *pEnd;       /* Most recent */
 } path;
 
@@ -197,7 +196,39 @@ PathNode *path_midpoint(void){
 }
 
 /*
-** COMMAND:  test-shortest-path
+** Compute the shortest path between two check-ins and then transfer
+** that path into the "ancestor" table.  This is a utility used by
+** both /annotate and /finfo.  See also: compute_direct_ancestors().
+*/
+void path_shortest_stored_in_ancestor_table(
+  int origid,     /* RID for check-in at start of the path */
+  int cid         /* RID for check-in at the end of the path */
+){
+  PathNode *pPath;
+  int gen = 0;
+  Stmt ins;
+  pPath = path_shortest(cid, origid, 1, 0);
+  db_multi_exec(
+    "CREATE TEMP TABLE IF NOT EXISTS ancestor("
+    "  rid INT UNIQUE,"
+    "  generation INTEGER PRIMARY KEY"
+    ");"
+    "DELETE FROM ancestor;"
+  );
+  db_prepare(&ins, "INSERT INTO ancestor(rid, generation) VALUES(:rid,:gen)");
+  while( pPath ){
+    db_bind_int(&ins, ":rid", pPath->rid);
+    db_bind_int(&ins, ":gen", ++gen);
+    db_step(&ins);
+    db_reset(&ins);
+    pPath = pPath->u.pTo;
+  }
+  db_finalize(&ins);
+  path_reset();
+}
+
+/*
+** COMMAND: test-shortest-path
 **
 ** Usage: %fossil test-shortest-path ?--no-merge? VERSION1 VERSION2
 **
@@ -303,7 +334,7 @@ int path_common_ancestor(int iMe, int iYou){
 }
 
 /*
-** COMMAND:  test-ancestor-path
+** COMMAND: test-ancestor-path
 **
 ** Usage: %fossil test-ancestor-path VERSION1 VERSION2
 **
@@ -454,7 +485,6 @@ void find_filename_changes(
     for(pChng=pAll, i=0; pChng; pChng=pChng->pNext){
       if( pChng->newName==0 ) continue;
       if( pChng->origName==0 ) continue;
-      if( pChng->newName==pChng->origName ) continue;
       aChng[i] = pChng->origName;
       aChng[i+1] = pChng->newName;
       if( zDebug ){

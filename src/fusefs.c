@@ -22,6 +22,7 @@
 ** The FOSSIL_HAVE_FUSEFS should be omitted on systems that lack support for
 ** the Fuse Filesystem, of course.
 */
+#ifdef FOSSIL_HAVE_FUSEFS
 #include "config.h"
 #include <stdio.h>
 #include <string.h>
@@ -31,7 +32,6 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include "fusefs.h"
-#ifdef FOSSIL_HAVE_FUSEFS
 
 #define FUSE_USE_VERSION 26
 #include <fuse.h>
@@ -53,7 +53,7 @@ static struct sGlobal {
 } fusefs;
 
 /*
-** Clear the fusefs.sz[] array.
+** Clear the fusefs.az[] array.
 */
 static void fusefs_clear_path(void){
   int i;
@@ -209,7 +209,8 @@ static int fusefs_readdir(
   manifest_file_rewind(fusefs.pMan);
   if( n==2 ){
     while( (pFile = manifest_file_next(fusefs.pMan, 0))!=0 ){
-      if( nPrev>0 && strncmp(pFile->zName, zPrev, nPrev)==0 ) continue;
+      if( nPrev>0 && strncmp(pFile->zName, zPrev, nPrev)==0
+                  && pFile->zName[nPrev]=='/' ) continue;
       zPrev = pFile->zName;
       for(nPrev=0; zPrev[nPrev] && zPrev[nPrev]!='/'; nPrev++){}
       z = mprintf("%.*s", nPrev, zPrev);
@@ -284,21 +285,20 @@ static struct fuse_operations fusefs_methods = {
   .readdir = fusefs_readdir,
   .read    = fusefs_read,
 };
-#endif /* FOSSIL_HAVE_FUSEFS */
 
 /*
 ** COMMAND: fusefs
 **
 ** Usage: %fossil fusefs [--debug] DIRECTORY
 **
-** This command uses the Fuse Filesystem to mount a directory at
-** DIRECTORY that contains the content of all check-ins in the
+** This command uses the Fuse Filesystem (FuseFS) to mount a directory
+** at DIRECTORY that contains the content of all check-ins in the
 ** repository.  The names of files are DIRECTORY/checkins/VERSION/PATH
 ** where DIRECTORY is the root of the mount, VERSION is any valid
 ** check-in name (examples: "trunk" or "tip" or a tag or any unique
-** prefix of a SHA1 hash, etc) and PATH is the pathname of the file
-** in the check-in.  If DIRECTORY does not exist, then an attempt is
-** made to create it.
+** prefix of an artifact hash, etc) and PATH is the pathname of the file in
+** the check-in.  If DIRECTORY does not exist, then an attempt is made
+** to create it.
 **
 ** The DIRECTORY/checkins directory is not searchable so one cannot
 ** do "ls DIRECTORY/checkins" to get a listing of all possible check-in
@@ -308,7 +308,7 @@ static struct fuse_operations fusefs_methods = {
 ** file hierarchy.
 **
 ** The FuseFS typically only works on Linux, and then only on Linux
-** systems that have the right kernel drivers and have install the
+** systems that have the right kernel drivers and have installed the
 ** appropriate support libraries.
 **
 ** After stopping the "fossil fusefs" command, it might also be necessary
@@ -316,9 +316,6 @@ static struct fuse_operations fusefs_methods = {
 ** again.
 */
 void fusefs_cmd(void){
-#ifndef FOSSIL_HAVE_FUSEFS
-  fossil_fatal("this build of fossil does not support the fuse filesystem");
-#else
   char *zMountPoint;
   char *azNewArgv[5];
   int doDebug = find_option("debug","d",0)!=0;
@@ -328,7 +325,7 @@ void fusefs_cmd(void){
   blob_init(&fusefs.content, 0, 0);
   if( g.argc!=3 ) usage("DIRECTORY");
   zMountPoint = g.argv[2];
-  if( file_mkdir(zMountPoint, 0) ){
+  if( file_mkdir(zMountPoint, ExtFILE, 0) ){
     fossil_fatal("cannot make directory [%s]", zMountPoint);
   }
   azNewArgv[0] = g.argv[0];
@@ -340,5 +337,26 @@ void fusefs_cmd(void){
   fuse_main(4, azNewArgv, &fusefs_methods, NULL);
   fusefs_reset();
   fusefs_clear_path();
+}
+#endif /* FOSSIL_HAVE_FUSEFS */
+
+/*
+** Return version numbers for the FUSE header that was used at compile-time
+** and/or the FUSE library that was loaded at runtime.
+*/
+const char *fusefs_lib_version(void){
+#if defined(FOSSIL_HAVE_FUSEFS) && FUSE_MAJOR_VERSION>=3
+  return fuse_pkgversion();
+#else
+  return "unknown";
+#endif
+}
+
+const char *fusefs_inc_version(void){
+#ifdef FOSSIL_HAVE_FUSEFS
+  return COMPILER_STRINGIFY(FUSE_MAJOR_VERSION) "."
+         COMPILER_STRINGIFY(FUSE_MINOR_VERSION);
+#else
+  return "unknown";
 #endif
 }

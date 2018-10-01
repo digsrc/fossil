@@ -44,7 +44,7 @@ hr {
 .content h2 {
     font-size: 1.15em;
 }
-.content h2 {
+.content h3 {
     font-size: 1.05em;
     font-weight: bold;
 }
@@ -106,13 +106,13 @@ hr {
     border-bottom: 1px solid #ccc;
 }
 
-.submenu a {
+.submenu a, .submenu label {
     padding: 10px 11px;
     text-decoration:none;
     color: #777;
 }
 
-.submenu a:hover {
+.submenu a:hover, .submenu label:hover {
     padding: 6px 10px;
     border: 1px solid #ccc;
     border-radius: 5px;
@@ -182,6 +182,10 @@ td.tktDspValue {
 }
 td.tktDspValue pre {
     white-space: pre-wrap;
+}
+
+span.timelineDetail {
+    font-size: 90%;
 }
 
 .footer {

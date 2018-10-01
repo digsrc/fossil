@@ -35,7 +35,7 @@
 const unsigned char *builtin_file(const char *zFilename, int *piSize){
   int lwr, upr, i, c;
   lwr = 0;
-  upr = sizeof(aBuiltinFiles)/sizeof(aBuiltinFiles[0]) - 1;
+  upr = count(aBuiltinFiles) - 1;
   while( upr>=lwr ){
     i = (upr+lwr)/2;
     c = strcmp(aBuiltinFiles[i].zName,zFilename);
@@ -58,13 +58,30 @@ const char *builtin_text(const char *zFilename){
 /*
 ** COMMAND: test-builtin-list
 **
-** List the names and sizes of all built-in resources
+** List the names and sizes of all built-in resources.
 */
 void test_builtin_list(void){
   int i;
-  for(i=0; i<sizeof(aBuiltinFiles)/sizeof(aBuiltinFiles[0]); i++){
+  for(i=0; i<count(aBuiltinFiles); i++){
     fossil_print("%-30s %6d\n", aBuiltinFiles[i].zName,aBuiltinFiles[i].nByte);
   }
+}
+
+/*
+** WEBPAGE: test-builtin-files
+**
+** Show all built-in text files.
+*/
+void test_builtin_list_page(void){
+  int i;
+  style_header("Built-in Text Files");
+  @ <ul>
+  for(i=0; i<count(aBuiltinFiles); i++){
+    const char *z = aBuiltinFiles[i].zName;
+    @ <li>%z(href("%R/builtin?name=%T&id=%S",z,MANIFEST_UUID))%h(z)</a>
+  }
+  @ </ul>
+  style_footer();
 }
 
 /*

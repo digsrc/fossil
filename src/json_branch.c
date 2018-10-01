@@ -129,7 +129,7 @@ static cson_value * json_branch_list(){
     }
   }
 
-  
+
   branch_prepare_list_query(&q, branchListFlags);
   cson_object_set(pay,"branches",listV);
   while((SQLITE_ROW==db_step(&q))){
@@ -142,7 +142,7 @@ static cson_value * json_branch_list(){
     }
   }
   if( sawConversionError ){
-    json_warn(FSL_JSON_W_COL_TO_JSON_FAILED,sawConversionError);
+    json_warn(FSL_JSON_W_COL_TO_JSON_FAILED,"%s",sawConversionError);
     free(sawConversionError);
   }
   return payV;
@@ -283,7 +283,7 @@ static int json_branch_new(BranchCreateOptions * zOpt,
     blob_appendf(&branch, "T -%F *\n", zTag);
   }
   db_finalize(&q);
-  
+
   blob_appendf(&branch, "U %F\n", g.zLogin);
   md5sum_blob(&branch, &mcksum);
   blob_appendf(&branch, "Z %b\n", &mcksum);
@@ -294,17 +294,17 @@ static int json_branch_new(BranchCreateOptions * zOpt,
   }
   db_multi_exec("INSERT OR IGNORE INTO unsent VALUES(%d)", brid);
   if( manifest_crosslink(brid, &branch, MC_PERMIT_HOOKS)==0 ){
-    fossil_fatal("%s\n", g.zErrMsg);
+    fossil_fatal("%s", g.zErrMsg);
   }
   assert( blob_is_reset(&branch) );
-  content_deltify(rootid, brid, 0);
+  content_deltify(rootid, &brid, 1, 0);
   if( zNewRid ){
     *zNewRid = brid;
   }
 
   /* Commit */
   db_end_transaction(0);
-  
+
 #if 0 /* Do an autosync push, if requested */
   /* arugable for JSON mode? */
   if( !g.isHTTP && !isPrivate ) autosync(SYNC_PUSH);
@@ -358,10 +358,10 @@ static cson_value * json_branch_create(){
       opt.isPrivate = 0;
     }
   }
-  
+
   rc = json_branch_new( &opt, &rid );
   if(rc){
-    json_set_err(rc, opt.rcErrMsg);
+    json_set_err(rc, "%s", opt.rcErrMsg);
     goto error;
   }
   assert(0 != rid);

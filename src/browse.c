@@ -173,36 +173,41 @@ void page_dir(void){
     blob_append(&dirname, "in directory ", -1);
     hyperlinked_path(zD, &dirname, zCI, "dir", "");
     zPrefix = mprintf("%s/", zD);
-    style_submenu_element("Top-Level", "Top-Level", "%s",
+    style_submenu_element("Top-Level", "%s",
                           url_render(&sURI, "name", 0, 0, 0));
   }else{
     blob_append(&dirname, "in the top-level directory", -1);
     zPrefix = "";
   }
   if( linkTrunk ){
-    style_submenu_element("Trunk", "Trunk", "%s",
+    style_submenu_element("Trunk", "%s",
                           url_render(&sURI, "ci", "trunk", 0, 0));
   }
   if( linkTip ){
-    style_submenu_element("Tip", "Tip", "%s",
-                          url_render(&sURI, "ci", "tip", 0, 0));
+    style_submenu_element("Tip", "%s", url_render(&sURI, "ci", "tip", 0, 0));
   }
   if( zCI ){
     @ <h2>Files of check-in [%z(href("vinfo?name=%!S",zUuid))%S(zUuid)</a>]
-    @ %s(blob_str(&dirname))</h2>
+    @ %s(blob_str(&dirname))
+    if( zD ){
+      @ &nbsp;&nbsp;%z(href("%R/timeline?chng=%T/*", zD))[history]</a>
+    }
+    @ </h2>
     zSubdirLink = mprintf("%R/dir?ci=%!S&name=%T", zUuid, zPrefix);
     if( nD==0 ){
-      style_submenu_element("File Ages", "File Ages", "%R/fileage?name=%!S",
-                            zUuid);
+      style_submenu_element("File Ages", "%R/fileage?name=%!S", zUuid);
     }
   }else{
     @ <h2>The union of all files from all check-ins
-    @ %s(blob_str(&dirname))</h2>
+    @ %s(blob_str(&dirname))
+    if( zD ){
+      @ &nbsp;&nbsp;%z(href("%R/timeline?chng=%T/*", zD))[history]</a>
+    }
+    @ </h2>
     zSubdirLink = mprintf("%R/dir?name=%T", zPrefix);
   }
-  style_submenu_element("All", "All", "%s",
-                        url_render(&sURI, "ci", 0, 0, 0));
-  style_submenu_element("Tree-View", "Tree-View", "%s",
+  style_submenu_element("All", "%s", url_render(&sURI, "ci", 0, 0, 0));
+  style_submenu_element("Tree-View", "%s",
                         url_render(&sURI, "type", "tree", 0, 0));
 
   /* Compute the temporary table "localfiles" containing the names
@@ -300,6 +305,62 @@ void page_dir(void){
   db_finalize(&q);
   manifest_destroy(pM);
   @ </ul></td></tr></table>
+
+  /* If the directory contains a readme file, then display its content below
+  ** the list of files
+  */
+  db_prepare(&q,
+    "SELECT x, u FROM localfiles"
+    " WHERE x COLLATE nocase IN"
+    " ('readme','readme.txt','readme.md','readme.wiki','readme.markdown',"
+    " 'readme.html') ORDER BY x LIMIT 1;"
+  );
+  if( db_step(&q)==SQLITE_ROW ){
+    const char *zName = db_column_text(&q,0);
+    const char *zUuid = db_column_text(&q,1);
+    if( zUuid ){
+      rid = fast_uuid_to_rid(zUuid);
+    }else{
+      if( zD ){
+        rid = db_int(0,
+           "SELECT fid FROM filename, mlink, event"
+           " WHERE name='%q/%q'"
+           "   AND mlink.fnid=filename.fnid"
+           "   AND event.objid=mlink.mid"
+           " ORDER BY event.mtime DESC LIMIT 1",
+           zD, zName
+        );
+      }else{
+        rid = db_int(0,
+           "SELECT fid FROM filename, mlink, event"
+           " WHERE name='%q'"
+           "   AND mlink.fnid=filename.fnid"
+           "   AND event.objid=mlink.mid"
+           " ORDER BY event.mtime DESC LIMIT 1",
+           zName
+        );
+      }
+    }
+    if( rid ){
+      @ <hr>
+      if( sqlite3_strlike("readme.html", zName, 0)==0 ){
+        if( zUuid==0 ){
+          zUuid = db_text(0, "SELECT uuid FROM blob WHERE rid=%d", rid);
+        }
+        @ <iframe src="%R/raw/%s(zUuid)"
+        @ width="100%%" frameborder="0" marginwidth="0" marginheight="0"
+        @ sandbox="allow-same-origin"
+        @ onload="this.height=this.contentDocument.documentElement.scrollHeight;">
+        @ </iframe>
+      }else{
+        Blob content;
+        const char *zMime = mimetype_from_name(zName);
+        content_get(rid, &content);
+        wiki_render_by_mimetype(&content, zMime);
+      }
+    }
+  }
+  db_finalize(&q);
   style_footer();
 }
 
@@ -320,7 +381,7 @@ struct FileTreeNode {
   FileTreeNode *pLastChild; /* Last child on the pChild list */
   char *zName;              /* Name of this entry.  The "tail" */
   char *zFullName;          /* Full pathname of this entry */
-  char *zUuid;              /* SHA1 hash of this file.  May be NULL. */
+  char *zUuid;              /* Artifact hash of this file.  May be NULL. */
   double mtime;             /* Modification time for this entry */
   unsigned nFullName;       /* Length of zFullName */
   unsigned iLevel;          /* Levels of parent directories */
@@ -350,7 +411,7 @@ struct FileTree {
 static void tree_add_node(
   FileTree *pTree,         /* Tree into which nodes are added */
   const char *zPath,       /* The full pathname of file to add */
-  const char *zUuid,       /* UUID of the file.  Might be NULL. */
+  const char *zUuid,       /* Hash of the file.  Might be NULL. */
   double mtime             /* Modification time for this entry */
 ){
   int i;
@@ -373,7 +434,7 @@ static void tree_add_node(
     int nByte;
     while( zPath[i] && zPath[i]!='/' ){ i++; }
     nByte = sizeof(*pNew) + i + 1;
-    if( zUuid!=0 && zPath[i]==0 ) nByte += UUID_SIZE+1;
+    if( zUuid!=0 && zPath[i]==0 ) nByte += HNAME_MAX+1;
     pNew = fossil_malloc( nByte );
     memset(pNew, 0, sizeof(*pNew));
     pNew->zFullName = (char*)&pNew[1];
@@ -382,7 +443,7 @@ static void tree_add_node(
     pNew->nFullName = i;
     if( zUuid!=0 && zPath[i]==0 ){
       pNew->zUuid = pNew->zFullName + i + 1;
-      memcpy(pNew->zUuid, zUuid, UUID_SIZE+1);
+      memcpy(pNew->zUuid, zUuid, strlen(zUuid)+1);
     }
     pNew->zName = pNew->zFullName + iStart;
     if( pTree->pLast ){
@@ -601,7 +662,7 @@ void page_tree(void){
       linkTip = rid != symbolic_name_to_rid("tip", "ci");
       zUuid = db_text(0, "SELECT uuid FROM blob WHERE rid=%d", rid);
       rNow = db_double(0.0, "SELECT mtime FROM event WHERE objid=%d", rid);
-      zNow = db_text("", "SELECT datetime(mtime,'localtime')"
+      zNow = db_text("", "SELECT datetime(mtime,toLocal())"
                          " FROM event WHERE objid=%d", rid);
     }else{
       zCI = 0;
@@ -609,7 +670,7 @@ void page_tree(void){
   }
   if( zCI==0 ){
     rNow = db_double(0.0, "SELECT max(mtime) FROM event");
-    zNow = db_text("", "SELECT datetime(max(mtime),'localtime') FROM event");
+    zNow = db_text("", "SELECT datetime(max(mtime),toLocal()) FROM event");
   }
 
   /* Compute the title of the page */
@@ -618,7 +679,7 @@ void page_tree(void){
     blob_append(&dirname, "within directory ", -1);
     hyperlinked_path(zD, &dirname, zCI, "tree", zREx);
     if( zRE ) blob_appendf(&dirname, " matching \"%s\"", zRE);
-    style_submenu_element("Top-Level", "Top-Level", "%s",
+    style_submenu_element("Top-Level", "%s",
                           url_render(&sURI, "name", 0, 0, 0));
   }else{
     if( zRE ){
@@ -627,22 +688,19 @@ void page_tree(void){
   }
   style_submenu_binary("mtime","Sort By Time","Sort By Filename", 0);
   if( zCI ){
-    style_submenu_element("All", "All", "%s",
-                          url_render(&sURI, "ci", 0, 0, 0));
+    style_submenu_element("All", "%s", url_render(&sURI, "ci", 0, 0, 0));
     if( nD==0 && !showDirOnly ){
-      style_submenu_element("File Ages", "File Ages", "%R/fileage?name=%s",
-                            zUuid);
+      style_submenu_element("File Ages", "%R/fileage?name=%s", zUuid);
     }
   }
   if( linkTrunk ){
-    style_submenu_element("Trunk", "Trunk", "%s",
+    style_submenu_element("Trunk", "%s",
                           url_render(&sURI, "ci", "trunk", 0, 0));
   }
   if( linkTip ){
-    style_submenu_element("Tip", "Tip", "%s",
-                          url_render(&sURI, "ci", "tip", 0, 0));
+    style_submenu_element("Tip", "%s", url_render(&sURI, "ci", "tip", 0, 0));
   }
-  style_submenu_element("Flat-View", "Flat-View", "%s",
+  style_submenu_element("Flat-View", "%s",
                         url_render(&sURI, "type", "flat", 0, 0));
 
   /* Compute the file hierarchy.
@@ -697,13 +755,11 @@ void page_tree(void){
       if( p->pChild!=0 && p->nFullName>nD ) nFile++;
     }
     zObjType = "Folders";
-    style_submenu_element("Files","Files","%s",
-                          url_render(&sURI,"nofiles",0,0,0));
   }else{
     zObjType = "Files";
-    style_submenu_element("Folders","Folders","%s",
-                          url_render(&sURI,"nofiles","1",0,0));
   }
+
+  style_submenu_checkbox("nofiles", "Folders Only", 0, 0);
 
   if( zCI ){
     @ <h2>%s(zObjType) from
@@ -793,76 +849,7 @@ void page_tree(void){
   }
   @ </ul>
   @ </ul></div>
-  @ <script>(function(){
-  @ function isExpanded(ul){
-  @   return ul.className=='';
-  @ }
-  @
-  @ function toggleDir(ul, useInitValue){
-  @   if( !useInitValue ){
-  @     expandMap[ul.id] = !isExpanded(ul);
-  @     history.replaceState(expandMap, '');
-  @   }
-  @   ul.className = expandMap[ul.id] ? '' : 'collapsed';
-  @ }
-  @
-  @ function toggleAll(tree, useInitValue){
-  @   var lists = tree.querySelectorAll('.subdir > ul > li ul');
-  @   if( !useInitValue ){
-  @     var expand = true;  /* Default action: make all sublists visible */
-  @     for( var i=0; lists[i]; i++ ){
-  @       if( isExpanded(lists[i]) ){
-  @         expand = false; /* Any already visible - make them all hidden */
-  @         break;
-  @       }
-  @     }
-  @     expandMap = {'*': expand};
-  @     history.replaceState(expandMap, '');
-  @   }
-  @   var className = expandMap['*'] ? '' : 'collapsed';
-  @   for( var i=0; lists[i]; i++ ){
-  @     lists[i].className = className;
-  @   }
-  @ }
-  @
-  @ function checkState(){
-  @   expandMap = history.state || {};
-  @   if( '*' in expandMap ) toggleAll(outer_ul, true);
-  @   for( var id in expandMap ){
-  @     if( id!=='*' ) toggleDir(gebi(id), true);
-  @   }
-  @ }
-  @
-  @ function belowSubdir(node){
-  @   do{
-  @     node = node.parentNode;
-  @     if( node==subdir ) return true;
-  @   } while( node && node!=outer_ul );
-  @   return false;
-  @ }
-  @
-  @ var history = window.history || {};
-  @ if( !history.replaceState ) history.replaceState = function(){};
-  @ var outer_ul = document.querySelector('.filetree > ul');
-  @ var subdir = outer_ul.querySelector('.subdir');
-  @ var expandMap = {};
-  @ checkState();
-  @ outer_ul.onclick = function(e){
-  @   e = e || window.event;
-  @   var a = e.target || e.srcElement;
-  @   if( a.nodeName!='A' ) return true;
-  @   if( a.parentNode.parentNode==subdir ){
-  @     toggleAll(outer_ul);
-  @     return false;
-  @   }
-  @   if( !belowSubdir(a) ) return true;
-  @   var ul = a.parentNode.nextSibling;
-  @   while( ul && ul.nodeName!='UL' ) ul = ul.nextSibling;
-  @   if( !ul ) return true; /* This is a file link, not a directory */
-  @   toggleDir(ul);
-  @   return false;
-  @ }
-  @ }())</script>
+  style_load_one_js_file("tree.js");
   style_footer();
 
   /* We could free memory used by sTree here if we needed to.  But
@@ -981,7 +968,7 @@ void test_fileage_cmd(void){
   const char *zGlob = find_option("glob",0,1);
   db_find_and_open_repository(0,0);
   verify_all_options();
-  if( g.argc!=3 ) usage("test-fileage CHECKIN");
+  if( g.argc!=3 ) usage("CHECKIN");
   mid = name_to_typed_rid(g.argv[2],"ci");
   compute_fileage(mid, zGlob);
   db_prepare(&q,
@@ -1001,7 +988,7 @@ void test_fileage_cmd(void){
 }
 
 /*
-** WEBPAGE:  fileage
+** WEBPAGE: fileage
 **
 ** Show all files in a single check-in (identified by the name= query
 ** parameter) in order of increasing age.
@@ -1023,6 +1010,7 @@ void fileage_page(void){
   double baseTime;
   login_check_credentials();
   if( !g.perm.Read ){ login_needed(g.anon.Read); return; }
+  if( exclude_spiders() ) return;
   zName = P("name");
   if( zName==0 ) zName = "tip";
   rid = symbolic_name_to_rid(zName, "ci");
@@ -1031,29 +1019,27 @@ void fileage_page(void){
   }
   zUuid = db_text("", "SELECT uuid FROM blob WHERE rid=%d", rid);
   baseTime = db_double(0.0,"SELECT mtime FROM event WHERE objid=%d", rid);
-  zNow = db_text("", "SELECT datetime(mtime,'localtime') FROM event"
+  zNow = db_text("", "SELECT datetime(mtime,toLocal()) FROM event"
                      " WHERE objid=%d", rid);
-  style_submenu_element("Tree-View", "Tree-View",
-                        "%R/tree?ci=%T&mtime=1&type=tree",
-                        zName);
+  style_submenu_element("Tree-View", "%R/tree?ci=%T&mtime=1&type=tree", zName);
   style_header("File Ages");
   zGlob = P("glob");
   compute_fileage(rid,zGlob);
   db_multi_exec("CREATE INDEX fileage_ix1 ON fileage(mid,pathname);");
 
-  @ <h2>Files in
+  @ <h1>Files in
   @ %z(href("%R/info/%!S",zUuid))[%S(zUuid)]</a>
   if( zGlob && zGlob[0] ){
-    @ that match "%h(zGlob)" and
+    @ that match "%h(zGlob)"
   }
-  @ ordered by check-in time</h2>
+  @ ordered by age</h1>
   @
-  @ <p>Times are relative to the check-in time for
-  @ %z(href("%R/ci/%!S",zUuid))[%S(zUuid)]</a> which is
+  @ <p>File ages are expressed relative to the
+  @ %z(href("%R/ci/%!S",zUuid))[%S(zUuid)]</a> check-in time of
   @ %z(href("%R/timeline?c=%t",zNow))%s(zNow)</a>.</p>
   @
   @ <div class='fileage'><table>
-  @ <tr><th>Time</th><th>Files</th><th>Check-in</th></tr>
+  @ <tr><th>Age</th><th>Files</th><th>Check-in</th></tr>
   db_prepare(&q1,
     "SELECT event.mtime, event.objid, blob.uuid,\n"
     "       coalesce(event.ecomment,event.comment),\n"
@@ -1089,22 +1075,22 @@ void fileage_page(void){
       const char *zFile = db_column_text(&q2,1);
       int fid = db_column_int(&q2,2);
       if( showId ){
-        @ %z(href("%R/artifact/%!S",zFUuid))%h(zFile)</a> (%d(fid))<br>
+        @ %z(href("%R/artifact/%!S",zFUuid))%h(zFile)</a> (%d(fid))<br />
       }else{
-        @ %z(href("%R/artifact/%!S",zFUuid))%h(zFile)</a><br>
+        @ %z(href("%R/artifact/%!S",zFUuid))%h(zFile)</a><br />
       }
     }
     db_reset(&q2);
     @ </td>
     @ <td>
-    @ %z(href("%R/info/%!S",zUuid))[%S(zUuid)]</a>
+    @ %W(zComment)
+    @ (check-in:&nbsp;%z(href("%R/ci/%!S",zUuid))%S(zUuid)</a>,
     if( showId ){
-      @ (%d(mid))
+      @ id: %d(mid)
     }
-    @ %W(zComment) (user:
-    @ %z(href("%R/timeline?u=%t&c=%!S&nd&n=200",zUser,zUuid))%h(zUser)</a>,
-    @ branch:
-    @ %z(href("%R/timeline?r=%t&c=%!S&nd&n=200",zBranch,zUuid))%h(zBranch)</a>)
+    @ user:&nbsp;%z(href("%R/timeline?u=%t&c=%!S&nd",zUser,zUuid))%h(zUser)</a>,
+    @ branch:&nbsp;\
+    @ %z(href("%R/timeline?r=%t&c=%!S&nd",zBranch,zUuid))%h(zBranch)</a>)
     @ </td></tr>
     @
     fossil_free(zAge);

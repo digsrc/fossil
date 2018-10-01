@@ -22,11 +22,16 @@
 */
 #include "config.h"
 #include "sqlcmd.h"
+#include <stdlib.h> /* atexit() */
 #if defined(FOSSIL_ENABLE_MINIZ)
 #  define MINIZ_HEADER_FILE_ONLY
 #  include "miniz.c"
 #else
 #  include <zlib.h>
+#endif
+
+#ifndef _WIN32
+#  include "linenoise.h"
 #endif
 
 /*
@@ -144,31 +149,116 @@ static int sqlcmd_autoinit(
   db_add_aux_functions(db);
   re_add_sql_func(db);
   search_sql_setup(db);
-  g.zMainDbType = "repository";
   foci_register(db);
   g.repositoryOpen = 1;
   g.db = db;
+  sqlite3_db_config(db, SQLITE_DBCONFIG_MAINDBNAME, "repository");
+  db_maybe_set_encryption_key(db, g.zRepositoryName);
+  if( g.zLocalDbName ){
+    char *zSql = sqlite3_mprintf("ATTACH %Q AS 'localdb' KEY ''",
+                                 g.zLocalDbName);
+    sqlite3_exec(db, zSql, 0, 0, 0);
+    sqlite3_free(zSql);
+  }
+  if( g.zConfigDbName ){
+    char *zSql = sqlite3_mprintf("ATTACH %Q AS 'configdb' KEY ''",
+                                 g.zConfigDbName);
+    sqlite3_exec(db, zSql, 0, 0, 0);
+    sqlite3_free(zSql);
+  }
   return SQLITE_OK;
 }
 
 /*
-** COMMAND: sqlite3
+** atexit() handler that cleans up global state modified by this module.
+*/
+static void sqlcmd_atexit(void) {
+  g.zConfigDbName = 0; /* prevent panic */
+}
+
+/*
+** This routine is called by the sqlite3 command-line shell to
+** to load the name the Fossil repository database.
+*/
+void sqlcmd_get_dbname(const char **pzRepoName){
+  *pzRepoName = g.zRepositoryName;
+}
+
+/*
+** This routine is called by the sqlite3 command-line shell to do
+** extra initialization prior to starting up the shell.
+*/
+void sqlcmd_init_proc(void){
+  sqlite3_initialize();
+  sqlite3_auto_extension((void(*)(void))sqlcmd_autoinit);
+}
+
+#if USE_SEE
+/*
+** This routine is called by the patched sqlite3 command-line shell in order
+** to load the encryption key for the open Fossil database.  The memory that
+** is pointed to by the value placed in pzKey must be obtained from SQLite.
+*/
+void fossil_key(const char **pzKey, int *pnKey){
+  char *zSavedKey = db_get_saved_encryption_key();
+  char *zKey;
+  size_t savedKeySize = db_get_saved_encryption_key_size();
+  size_t nByte;
+
+  if( zSavedKey==0 || savedKeySize==0 ) return;
+  nByte = savedKeySize * sizeof(char);
+  zKey = sqlite3_malloc( (int)nByte );
+  if( zKey ){
+    memcpy(zKey, zSavedKey, nByte);
+    *pzKey = zKey;
+    if( fossil_getenv("FOSSIL_USE_SEE_TEXTKEY")==0 ){
+      *pnKey = (int)strlen(zKey);
+    }else{
+      *pnKey = -1;
+    }
+  }else{
+    fossil_fatal("failed to allocate %u bytes for key", nByte);
+  }
+}
+#endif
+
+/*
+** This routine closes the Fossil databases and/or invalidates the global
+** state variables that keep track of them.
+*/
+static void fossil_close(int bDb, int noRepository){
+  if( bDb ) db_close(1);
+  if( noRepository ) g.zRepositoryName = 0;
+  g.db = 0;
+  g.repositoryOpen = 0;
+  g.localOpen = 0;
+}
+
+/*
+** COMMAND: sql
+** COMMAND: sqlite3*
 **
-** Usage: %fossil sqlite3 ?DATABASE? ?OPTIONS?
+** Usage: %fossil sql ?OPTIONS?
 **
-** Run the standalone sqlite3 command-line shell on DATABASE with OPTIONS.
+** Run the standalone sqlite3 command-line shell on DATABASE with SHELL_OPTS.
 ** If DATABASE is omitted, then the repository that serves the working
 ** directory is opened.  See https://www.sqlite.org/cli.html for additional
 ** information.
 **
+** Options:
+**
+**    --no-repository           Skip opening the repository database.
+**
+**    -R REPOSITORY             Use REPOSITORY as the repository database
+**
 ** WARNING:  Careless use of this command can corrupt a Fossil repository
 ** in ways that are unrecoverable.  Be sure you know what you are doing before
-** running any SQL commands that modifies the repository database.
+** running any SQL commands that modify the repository database.
 **
 ** The following extensions to the usual SQLite commands are provided:
 **
-**    content(X)                Return the contenxt of artifact X.  X can be a
-**                              SHA1 hash or prefix or a tag.
+**    content(X)                Return the content of artifact X.  X can be an
+**                              artifact hash or prefix or a tag.
 **
 **    compress(X)               Compress text X.
 **
@@ -178,7 +268,7 @@ static int sqlcmd_autoinit(
 **    checkin_mtime(X,Y)        Return the mtime for the file Y (a BLOB.RID)
 **                              found in check-in X (another BLOB.RID value).
 **
-**    symbolic_name_to_rid(X)   Return a the BLOB.RID corresponding to symbolic
+**    symbolic_name_to_rid(X)   Return the BLOB.RID corresponding to symbolic
 **                              name X.
 **
 **    now()                     Return the number of seconds since 1970.
@@ -186,32 +276,31 @@ static int sqlcmd_autoinit(
 **    REGEXP                    The REGEXP operator works, unlike in
 **                              standard SQLite.
 **
-**    files_of_checkin          The "files_of_check" virtual table is
-**                              available for decoding manifests.
-**
-** Usage example for files_of_checkin:
-**
-**     CREATE VIRTUAL TABLE temp.foci USING files_of_checkin;
-**     SELECT * FROM foci WHERE checkinID=symbolic_name_to_rid('trunk');
+**    files_of_checkin(X)       A table-valued function that returns info on
+**                              all files contained in check-in X.  Example:
+**                                SELECT * FROM files_of_checkin('trunk');
 */
 void cmd_sqlite3(void){
+  int noRepository;
+  const char *zConfigDb;
   extern int sqlite3_shell(int, char**);
-  db_find_and_open_repository(OPEN_ANY_SCHEMA, 0);
-  db_close(1);
+#ifdef FOSSIL_ENABLE_TH1_HOOKS
+  g.fNoThHook = 1;
+#endif
+  noRepository = find_option("no-repository", 0, 0)!=0;
+  if( !noRepository ){
+    db_find_and_open_repository(OPEN_ANY_SCHEMA, 0);
+  }
+  db_open_config(1,0);
+  zConfigDb = g.zConfigDbName;
+  fossil_close(1, noRepository);
   sqlite3_shutdown();
+#ifndef _WIN32
+  linenoiseSetMultiLine(1);
+#endif
+  atexit(sqlcmd_atexit);
+  g.zConfigDbName = zConfigDb;
   sqlite3_shell(g.argc-1, g.argv+1);
   sqlite3_cancel_auto_extension((void(*)(void))sqlcmd_autoinit);
-  g.db = 0;
-  g.zMainDbType = 0;
-  g.repositoryOpen = 0;
-  g.localOpen = 0;
-}
-
-/*
-** This routine is called by the patched sqlite3 command-line shell in order
-** to load the name and database connection for the open Fossil database.
-*/
-void fossil_open(const char **pzRepoName){
-  sqlite3_auto_extension((void(*)(void))sqlcmd_autoinit);
-  *pzRepoName = g.zRepositoryName;
+  fossil_close(0, noRepository);
 }

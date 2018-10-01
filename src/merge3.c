@@ -318,7 +318,7 @@ int contains_merge_marker(Blob *p){
   assert( len==(int)strlen(mergeMarker[1]) );
   assert( len==(int)strlen(mergeMarker[2]) );
   assert( len==(int)strlen(mergeMarker[3]) );
-  assert( sizeof(mergeMarker)/sizeof(mergeMarker[0])==4 );
+  assert( count(mergeMarker)==4 );
   for(i=0; i<n; ){
     for(j=0; j<4; j++){
       if( memcmp(&z[i], mergeMarker[j], len)==0 ) return 1;
@@ -335,14 +335,14 @@ int contains_merge_marker(Blob *p){
 int file_contains_merge_marker(const char *zFullpath){
   Blob file;
   int rc;
-  blob_read_from_file(&file, zFullpath);
+  blob_read_from_file(&file, zFullpath, ExtFILE);
   rc = contains_merge_marker(&file);
   blob_reset(&file);
   return rc;
 }
 
 /*
-** COMMAND:  3-way-merge*
+** COMMAND: 3-way-merge*
 **
 ** Usage: %fossil 3-way-merge BASELINE V1 V2 MERGED
 **
@@ -370,6 +370,7 @@ int file_contains_merge_marker(const char *zFullpath){
 */
 void delta_3waymerge_cmd(void){
   Blob pivot, v1, v2, merged;
+  int nConflict;
 
   /* We should be done with options.. */
   verify_all_options();
@@ -377,23 +378,24 @@ void delta_3waymerge_cmd(void){
   if( g.argc!=6 ){
     usage("PIVOT V1 V2 MERGED");
   }
-  if( blob_read_from_file(&pivot, g.argv[2])<0 ){
-    fossil_fatal("cannot read %s\n", g.argv[2]);
+  if( blob_read_from_file(&pivot, g.argv[2], ExtFILE)<0 ){
+    fossil_fatal("cannot read %s", g.argv[2]);
   }
-  if( blob_read_from_file(&v1, g.argv[3])<0 ){
-    fossil_fatal("cannot read %s\n", g.argv[3]);
+  if( blob_read_from_file(&v1, g.argv[3], ExtFILE)<0 ){
+    fossil_fatal("cannot read %s", g.argv[3]);
   }
-  if( blob_read_from_file(&v2, g.argv[4])<0 ){
-    fossil_fatal("cannot read %s\n", g.argv[4]);
+  if( blob_read_from_file(&v2, g.argv[4], ExtFILE)<0 ){
+    fossil_fatal("cannot read %s", g.argv[4]);
   }
-  blob_merge(&pivot, &v1, &v2, &merged);
+  nConflict = blob_merge(&pivot, &v1, &v2, &merged);
   if( blob_write_to_file(&merged, g.argv[5])<blob_size(&merged) ){
-    fossil_fatal("cannot write %s\n", g.argv[4]);
+    fossil_fatal("cannot write %s", g.argv[4]);
   }
   blob_reset(&pivot);
   blob_reset(&v1);
   blob_reset(&v2);
   blob_reset(&merged);
+  if( nConflict>0 ) fossil_warning("WARNING: %d merge conflicts", nConflict);
 }
 
 /*
@@ -466,7 +468,7 @@ int merge_3way(
   Blob v1;            /* Content of zV1 */
   int rc;             /* Return code of subroutines and this routine */
 
-  blob_read_from_file(&v1, zV1);
+  blob_read_from_file(&v1, zV1, ExtFILE);
   rc = blob_merge(pPivot, &v1, pV2, pOut);
   if( rc!=0 && (mergeFlags & MERGE_DRYRUN)==0 ){
     char *zPivot;       /* Name of the pivot file */
@@ -496,8 +498,8 @@ int merge_3way(
         zCmd = string_subst(zGMerge, 8, azSubst);
         printf("%s\n", zCmd); fflush(stdout);
         fossil_system(zCmd);
-        if( file_wd_size(zOut)>=0 ){
-          blob_read_from_file(pOut, zOut);
+        if( file_size(zOut, RepoFILE)>=0 ){
+          blob_read_from_file(pOut, zOut, ExtFILE);
           file_delete(zPivot);
           file_delete(zOrig);
           file_delete(zOther);

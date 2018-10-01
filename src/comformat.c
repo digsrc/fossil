@@ -228,9 +228,8 @@ static void comment_print_line(
     }
     assert( c!='\n' || charCnt==0 );
     fossil_print("%c", c);
-    maxChars -= useChars;
-    if( maxChars==0 ) break;
-    assert( maxChars>0 );
+    if( (c&0x80)==0 || (zLine[index+1]&0xc0)!=0xc0 ) maxChars -= useChars;
+    if( maxChars<=0 ) break;
     if( c=='\n' ) break;
   }
   if( charCnt>0 ){
@@ -487,11 +486,11 @@ void test_comment_format(void){
   }
   if( fromFile ){
     Blob fileData;
-    blob_read_from_file(&fileData, zText);
+    blob_read_from_file(&fileData, zText, ExtFILE);
     zText = mprintf("%s", blob_str(&fileData));
     blob_reset(&fileData);
     if( zOrigText ){
-      blob_read_from_file(&fileData, zOrigText);
+      blob_read_from_file(&fileData, zOrigText, ExtFILE);
       zOrigText = mprintf("%s", blob_str(&fileData));
       blob_reset(&fileData);
     }

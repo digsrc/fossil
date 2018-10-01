@@ -20,9 +20,18 @@
 
 fossil test-th-eval "hasfeature th1Hooks"
 
-if {$::RESULT ne "1"} then {
-  puts "Fossil was not compiled with TH1 hooks support."; return
+if {[normalize_result] ne "1"} {
+  puts "Fossil was not compiled with TH1 hooks support."
+  test_cleanup_then_return
 }
+
+###############################################################################
+
+test_setup
+
+###############################################################################
+
+write_file f1 "f1"; fossil add f1; fossil commit -m "c1"
 
 ###############################################################################
 
@@ -63,13 +72,21 @@ set testTh1Setup {
       break "TH_BREAK return code"
     } elseif {$::cmd_name eq "test4"} {
       emit_hook_log
-      return -code 2 "TH_RETURN return code"
+      return -code 5 "TH_RETURN return code"
     } elseif {$::cmd_name eq "timeline"} {
       set length [llength $::cmd_args]
       set length [expr {$length - 1}]
       if {[lindex $::cmd_args $length] eq "custom"} {
+        append_hook_log "CUSTOM TIMELINE"
         emit_hook_log
         return "custom timeline"
+      } elseif {[lindex $::cmd_args $length] eq "custom2"} {
+        emit_hook_log
+        puts "+++ some stuff here +++"
+        continue "custom2 timeline"
+      } elseif {[lindex $::cmd_args $length] eq "custom3"} {
+        emit_hook_log
+        return -code 5 "TH_RETURN return code"
       } elseif {[lindex $::cmd_args $length] eq "now"} {
         emit_hook_log
         return "now timeline"
@@ -103,7 +120,7 @@ set testTh1Setup {
 set data [fossil info]
 regexp -line -- {^repository:   (.*)$} $data dummy repository
 
-if {[string length $repository] == 0 || ![file exists $repository]} then {
+if {[string length $repository] == 0 || ![file exists $repository]} {
   error "unable to locate repository"
 }
 
@@ -115,12 +132,26 @@ saveTh1SetupFile; writeTh1SetupFile $testTh1Setup
 
 ###############################################################################
 
-fossil timeline custom; # NOTE: Bad "WHEN" argument.
+fossil timeline custom -expectError; # NOTE: Bad "WHEN" argument.
 test th1-cmd-hooks-1a {[normalize_result] eq \
-{<h1><b>command_hook timeline</b></h1>
-+++ no more data (0) +++
+{<h1><b>command_hook timeline CUSTOM TIMELINE</b></h1>
+unknown check-in or invalid date: custom}}
 
+###############################################################################
+
+fossil timeline custom2; # NOTE: Bad "WHEN" argument.
+test th1-cmd-hooks-1b {[normalize_result] eq \
+{<h1><b>command_hook timeline</b></h1>
++++ some stuff here +++
 <h1><b>command_hook timeline command_notify timeline</b></h1>}}
+
+###############################################################################
+
+fossil timeline custom3; # NOTE: Bad "WHEN" argument.
+
+test th1-cmd-hooks-1c {[normalize_result] eq \
+{<h1><b>command_hook timeline</b></h1>
+unknown check-in or invalid date: custom3}}
 
 ###############################################################################
 
@@ -132,7 +163,7 @@ test th1-cmd-hooks-2b {[second_data_line] eq {ERROR: unsupported timeline}}
 
 ###############################################################################
 
-fossil timeline now
+fossil timeline -n -1 now
 test th1-cmd-hooks-3a {[first_data_line] eq \
     {<h1><b>command_hook timeline</b></h1>}}
 
@@ -167,13 +198,22 @@ test th1-custom-cmd-3a {[string trim $RESULT] eq \
 ###############################################################################
 
 fossil test4
-test th1-custom-cmd-4a {[string trim $RESULT] eq \
+
+test th1-custom-cmd-4a {[first_data_line] eq \
     {<h1><b>command_hook test4</b></h1>}}
+
+test th1-custom-cmd-4b {[regexp -- \
+    {: unknown command: test4$} [second_data_line]]}
+
+test th1-custom-cmd-4d {[regexp -- \
+    {: use "help" for more information$} [third_data_line]]}
 
 ###############################################################################
 
 set RESULT [test_fossil_http $repository $dataFileName /timeline]
-test th1-web-hooks-1a {[regexp {<title>Fossil: Timeline</title>} $RESULT]}
+
+test th1-web-hooks-1a {[regexp \
+    {<title>Unnamed Fossil Project: Timeline</title>} $RESULT]}
 
 test th1-web-hooks-1b {[regexp [appendArgs \
     {<h1><b>command_hook http webpage_hook timeline} " " \
@@ -190,3 +230,7 @@ test th1-custom-web-1b {[last_data_line] eq \
 ###############################################################################
 
 restoreTh1SetupFile
+
+###############################################################################
+
+test_cleanup

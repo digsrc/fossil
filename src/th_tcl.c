@@ -27,6 +27,14 @@
 #include "tcl.h"
 
 /*
+** This macro is used to verify that the header version of Tcl meets some
+** minimum requirement.
+*/
+#define MINIMUM_TCL_VERSION(major, minor) \
+  ((TCL_MAJOR_VERSION > (major)) || \
+   ((TCL_MAJOR_VERSION == (major)) && (TCL_MINOR_VERSION >= (minor))))
+
+/*
 ** These macros are designed to reduce the redundant code required to marshal
 ** arguments from TH1 to Tcl.
 */
@@ -124,6 +132,13 @@
 #      endif
 #      ifndef TCL_MINOR_OFFSET
 #        define TCL_MINOR_OFFSET (8)
+#      endif
+#    elif defined(__FreeBSD__)
+#      ifndef TCL_LIBRARY_NAME
+#        define TCL_LIBRARY_NAME "libtcl86.so\0"
+#      endif
+#      ifndef TCL_MINOR_OFFSET
+#        define TCL_MINOR_OFFSET (7)
 #      endif
 #    else
 #      ifndef TCL_LIBRARY_NAME
@@ -287,6 +302,7 @@ static int canUseObjProc(){
 ** 8.6 and higher.
 */
 static int canUseTip285(){
+#if MINIMUM_TCL_VERSION(8, 6)
   int major = -1, minor = -1, patchLevel = -1, type = -1;
 
   Tcl_GetVersion(&major, &minor, &patchLevel, &type);
@@ -294,6 +310,9 @@ static int canUseTip285(){
     return 0; /* NOTE: Invalid version info, assume bad. */
   }
   return (major>8 || (major==8 && minor>=6));
+#else
+  return 0;
+#endif
 }
 
 /*
@@ -823,7 +842,7 @@ static void Th1DeleteProc(
 
   if( !th1Interp ) return;
   /* Remove the Tcl integration commands. */
-  for(i=0; i<(sizeof(aCommand)/sizeof(aCommand[0])); i++){
+  for(i=0; i<count(aCommand); i++){
     Th_RenameCommand(th1Interp, aCommand[i].zName, -1, NULL, 0);
   }
 }
@@ -836,7 +855,10 @@ static void Th1DeleteProc(
 ** functions.
 */
 char *fossil_getenv(const char *zName); /* file.h */
-int file_isdir(const char *zPath);      /* file.h */
+int file_isdir(const char *zPath, int); /* file.h */
+#define ExtFILE    0                    /* file.h */
+#define RepoFILE   1                    /* file.h */
+#define SymFILE    2                    /* file.h */
 char *file_dirname(const char *zPath);  /* file.h */
 void fossil_free(void *p);              /* util.h */
 
@@ -865,7 +887,7 @@ static int loadTcl(
     void *hLibrary;
     if( !zEnvPath ){
       zFileName = aFileName; /* NOTE: Assume present in PATH. */
-    }else if( file_isdir(zEnvPath)==1 ){
+    }else if( file_isdir(zEnvPath, ExtFILE)==1 ){
 #if TCL_USE_SET_DLL_DIRECTORY
       SetDllDirectory(zEnvPath); /* NOTE: Maybe needed for "zlib1.dll". */
 #endif /* TCL_USE_SET_DLL_DIRECTORY */
@@ -1066,9 +1088,11 @@ int evaluateTclWithEvents(
     if( Tcl_InterpDeleted(tclInterp) ){
       break;
     }
+#if MINIMUM_TCL_VERSION(8, 6)
     if( useTip285 && Tcl_Canceled(tclInterp, 0)!=TCL_OK ){
       break;
     }
+#endif
   }
   Tcl_Release((ClientData)tclInterp);
   return rc;
@@ -1249,7 +1273,7 @@ int th_register_tcl(
   int i;
 
   /* Add the Tcl integration commands to TH1. */
-  for(i=0; i<(sizeof(aCommand)/sizeof(aCommand[0])); i++){
+  for(i=0; i<count(aCommand); i++){
     void *ctx;
     if( !aCommand[i].zName || !aCommand[i].xProc ) continue;
     ctx = aCommand[i].pContext;

@@ -147,7 +147,7 @@ static const struct AllowedAttribute {
 static int findAttr(const char *z){
   int i, c, first, last;
   first = 1;
-  last = sizeof(aAttribute)/sizeof(aAttribute[0]) - 1;
+  last = count(aAttribute) - 1;
   while( first<=last ){
     i = (first+last)/2;
     c = fossil_strcmp(aAttribute[i].zName, z);
@@ -374,7 +374,7 @@ static const struct AllowedMarkup {
 
 void show_allowed_wiki_markup( void ){
   int i; /* loop over allowedAttr */
-  for( i=1 ; i<=sizeof(aMarkup)/sizeof(aMarkup[0]) - 1 ; i++ ){
+  for( i=1 ; i<=count(aMarkup) - 1 ; i++ ){
     @ &lt;%s(aMarkup[i].zName)&gt;
   }
 }
@@ -385,7 +385,7 @@ void show_allowed_wiki_markup( void ){
 static int findTag(const char *z){
   int i, c, first, last;
   first = 1;
-  last = sizeof(aMarkup)/sizeof(aMarkup[0]) - 1;
+  last = count(aMarkup) - 1;
   while( first<=last ){
     i = (first+last)/2;
     c = fossil_strcmp(aMarkup[i].zName, z);
@@ -469,7 +469,7 @@ static int wikiUsesHtml(void){
 ** the markup including the initial "<" and the terminating ">".  If
 ** it is not well-formed markup, return 0.
 */
-static int markupLength(const char *z){
+int htmlTagLength(const char *z){
   int n = 1;
   int inparen = 0;
   int c;
@@ -664,7 +664,7 @@ static int linkLength(const char *z){
 static int nextWikiToken(const char *z, Renderer *p, int *pTokenType){
   int n;
   if( z[0]=='<' ){
-    n = markupLength(z);
+    n = htmlTagLength(z);
     if( n>0 ){
       *pTokenType = TOKEN_MARKUP;
       return n;
@@ -949,7 +949,7 @@ static int isButtonHyperlink(
   j = (int)strlen(zTag);
   while( j>0 && fossil_isspace(zTag[j-1]) ){ j--; }
   if( j==0 ) return 0;
-  style_submenu_element(zTag, zTag, "%s", zHref);
+  style_submenu_element(zTag, "%s", zHref);
   *pN = i+4;
   return 1;
 }
@@ -1067,22 +1067,22 @@ static void endAutoParagraph(Renderer *p){
 ** If the input string corresponds to an existing baseline,
 ** return true.
 */
-static int is_valid_uuid(const char *z){
+static int is_valid_hname(const char *z){
   int n = strlen(z);
-  if( n<4 || n>UUID_SIZE ) return 0;
+  if( n<4 || n>HNAME_MAX ) return 0;
   if( !validate16(z, n) ) return 0;
   return 1;
 }
 
 /*
-** Return TRUE if a UUID corresponds to an artifact in this
+** Return TRUE if a hash name corresponds to an artifact in this
 ** repository.
 */
 static int in_this_repo(const char *zUuid){
   static Stmt q;
   int rc;
   int n;
-  char zU2[UUID_SIZE+1];
+  char zU2[HNAME_MAX+1];
   db_static_prepare(&q,
      "SELECT 1 FROM blob WHERE uuid>=:u AND uuid<:u2"
   );
@@ -1112,8 +1112,8 @@ static int is_ticket(
   static int once = 1;
   int n;
   int rc;
-  char zLower[UUID_SIZE+1];
-  char zUpper[UUID_SIZE+1];
+  char zLower[HNAME_MAX+1];
+  char zUpper[HNAME_MAX+1];
   n = strlen(zTarget);
   memcpy(zLower, zTarget, n+1);
   canonical16(zLower, n+1);
@@ -1218,9 +1218,9 @@ static void openHyperlink(
     blob_appendf(p->pOut, "<a href=\"%h\">", zTarget);
   }else if( zTarget[0]=='#' ){
     blob_appendf(p->pOut, "<a href=\"%h\">", zTarget);
-  }else if( is_valid_uuid(zTarget) ){
+  }else if( is_valid_hname(zTarget) ){
     int isClosed = 0;
-    if( is_ticket(zTarget, &isClosed) ){
+    if( strlen(zTarget)<=HNAME_MAX && is_ticket(zTarget, &isClosed) ){
       /* Special display processing for tickets.  Display the hyperlink
       ** as crossed out if the ticket is closed.
       */
@@ -1721,7 +1721,7 @@ void wiki_write(const char *zIn, int flags){
 /*
 ** COMMAND: test-wiki-render
 **
-** %fossil test-wiki-render FILE [OPTIONS]
+** Usage: %fossil test-wiki-render FILE [OPTIONS]
 **
 ** Options:
 **    --buttons        Set the WIKI_BUTTONS flag
@@ -1740,11 +1740,10 @@ void test_wiki_render(void){
   if( find_option("nobadlinks",0,0)!=0 ) flags |= WIKI_NOBADLINKS;
   if( find_option("inline",0,0)!=0 ) flags |= WIKI_INLINE;
   if( find_option("noblock",0,0)!=0 ) flags |= WIKI_NOBLOCK;
-  db_find_and_open_repository(0,0);
   verify_all_options();
   if( g.argc!=3 ) usage("FILE");
   blob_zero(&out);
-  blob_read_from_file(&in, g.argv[2]);
+  blob_read_from_file(&in, g.argv[2], ExtFILE);
   wiki_convert(&in, &out, flags);
   blob_write_to_file(&out, "-");
 }
@@ -1834,14 +1833,14 @@ void wiki_extract_links(
       case TOKEN_LINK: {
         char *zTarget;
         int i, c;
-        char zLink[42];
+        char zLink[HNAME_MAX+4];
 
         zTarget = &z[1];
         for(i=0; zTarget[i] && zTarget[i]!='|' && zTarget[i]!=']'; i++){}
         while(i>1 && zTarget[i-1]==' '){ i--; }
         c = zTarget[i];
         zTarget[i] = 0;
-        if( is_valid_uuid(zTarget) ){
+        if( is_valid_hname(zTarget) ){
           memcpy(zLink, zTarget, i+1);
           canonical16(zLink, i);
           db_multi_exec(
@@ -1974,7 +1973,7 @@ static int nextHtmlToken(const char *z){
   int n;
   char c;
   if( (c=z[0])=='<' ){
-    n = markupLength(z);
+    n = htmlTagLength(z);
     if( n<=0 ) n = 1;
   }else if( fossil_isspace(c) ){
     for(n=1; z[n] && fossil_isspace(z[n]); n++){}
@@ -2107,7 +2106,7 @@ void test_html_tidy(void){
   int i;
 
   for(i=2; i<g.argc; i++){
-    blob_read_from_file(&in, g.argv[i]);
+    blob_read_from_file(&in, g.argv[i], ExtFILE);
     blob_zero(&out);
     htmlTidy(blob_str(&in), &out);
     blob_reset(&in);
@@ -2189,7 +2188,7 @@ void html_to_plaintext(const char *zIn, Blob *pOut){
            { 6, ' ', "&nbsp;"  },
         };
         int jj;
-        for(jj=0; jj<ArraySize(aEntity); jj++){
+        for(jj=0; jj<count(aEntity); jj++){
           if( aEntity[jj].n==n && strncmp(aEntity[jj].z,zIn,n)==0 ){
             c = aEntity[jj].c;
             break;
@@ -2234,7 +2233,7 @@ void test_html_to_text(void){
   int i;
 
   for(i=2; i<g.argc; i++){
-    blob_read_from_file(&in, g.argv[i]);
+    blob_read_from_file(&in, g.argv[i], ExtFILE);
     blob_zero(&out);
     html_to_plaintext(blob_str(&in), &out);
     blob_reset(&in);

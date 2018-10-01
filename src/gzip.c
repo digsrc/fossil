@@ -67,7 +67,7 @@ void gzip_begin(sqlite3_int64 now){
   }
   put32(&aHdr[4], now&0xffffffff);
   aHdr[8] = 2;
-  aHdr[9] = 255;
+  aHdr[9] = -1;
   blob_append(&gzip.out, aHdr, 10);
   gzip.iCRC = 0;
   gzip.eState = 1;
@@ -134,7 +134,7 @@ void test_gzip_cmd(void){
   if( g.argc!=3 ) usage("FILENAME");
   sqlite3_open(":memory:", &g.db);
   gzip_begin(-1);
-  blob_read_from_file(&b, g.argv[2]);
+  blob_read_from_file(&b, g.argv[2], ExtFILE);
   zOut = mprintf("%s.gz", g.argv[2]);
   gzip_step(blob_buffer(&b), blob_size(&b));
   blob_reset(&b);

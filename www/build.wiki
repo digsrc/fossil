@@ -2,13 +2,11 @@
 
 <h2>0.0 Using A Pre-compiled Binary</h2>
 
-<p>Released versions of fossil come with
-<a href="http://www.fossil-scm.org/download.html">pre-compiled binaries and
-a source archive</a> for that release. You can thus skip the following if you
-want to run or build a release version of fossil. Just download
-the appropriate package from the <a href="http://www.fossil-scm.org/download.html">downloads page</a>
+<p>[/uv/download.html|Pre-compiled binaries] are available for recent
+releases. Just download
+the appropriate executable for your platform
 and put it on your $PATH.
-To uninstall, simply delete the binary.
+To uninstall, simply delete the executable.
 To upgrade from an older release, just overwrite the older binary with
 the newer one.</p>
 
@@ -31,16 +29,13 @@ your $PATH.
 containing a snapshot of the <em>latest</em> version directly from
 Fossil's own fossil repository. Additionally, source archives of
 <em>released</em> versions of
-fossil are available from the <a href="http://www.fossil-scm.org/download.html">downloads page</a>.
+fossil are available from the [/uv/download.html|downloads page].
 To obtain a development version of fossil, follow these steps:</p>
 
 <ol>
-<li><p>Point your web browser to
-<a href="http://www.fossil-scm.org/">
-http://www.fossil-scm.org/</a>.</p></li>
+<li><p>Point your web browser to [https://www.fossil-scm.org/]</li>
 
-<li><p>Click on the
-<a href="http://www.fossil-scm.org/fossil/timeline">Timeline</a>
+<li><p>Click on the [/timeline|Timeline]
 link at the top of the page.</p></li>
 
 <li><p>Select a version of of Fossil you want to download.  The latest
@@ -113,19 +108,25 @@ running configure, you can also use: <b>make -f Makefile.classic</b>.  You may
 want to make minor edits to Makefile.classic to configure the build for your
 system.
 
-<li><p><i>MinGW3.x (not 4.0)/MinGW-w64</i> → Use the mingw makefile:
-"<b>make -f win/Makefile.mingw</b>". On a Windows box you will
-need either Cygwin or Msys as build environment. On Cygwin, Linux
-or Darwin you may want to make minor edits to win/Makefile.mingw
-to configure the cross-compile environment.
+<li><p><i>MinGW 3.x (<u>not</u> 4.x) / MinGW-w64</i> → Use the MinGW makefile:
+"<b>make -f win/Makefile.mingw</b>".  On a Windows box you will need either
+Cygwin or Msys as build environment. On Cygwin, Linux or Darwin you may want
+to make minor edits to win/Makefile.mingw to configure the cross-compile
+environment.
 
 To enable the native [./th1.md#tclEval | Tcl integration feature], use a
 command line like the following (all on one line):
 
 <b>make -f win/Makefile.mingw FOSSIL_ENABLE_TCL=1 FOSSIL_ENABLE_TCL_STUBS=1 FOSSIL_ENABLE_TCL_PRIVATE_STUBS=1</b>
 
-Hint: don't use MinGW-4.0, it will compile but fossil won't work correctly, see
-<a href="https://www.fossil-scm.org/index.html/tktview/18cff45a4e210430e24c">https://www.fossil-scm.org/index.html/tktview/18cff45a4e210430e24c</a>.
+Alternatively, <b>./configure</b> may now be used to create a Makefile
+suitable for use with MinGW; however, options passed to configure that are
+not applicable on Windows may cause the configuration or compilation to fail
+(e.g. fusefs, internal-sqlite, etc).
+
+<i>HINT</i>: Do <u>not</u> use MinGW-4.x, it may compile but the Fossil binary
+will not work correctly, see
+[https://www.fossil-scm.org/index.html/tktview/18cff45a4e210430e24c | ticket].
 
 <li><p><i>MSVC</i> → Use the MSVC makefile.  First
 change to the "win/" subdirectory ("<b>cd win</b>") then run
@@ -137,7 +138,7 @@ first <a href="https://www.openssl.org/source/">download the official
 source code for OpenSSL</a> and extract it to an appropriately named
 "<b>openssl-X.Y.ZA</b>" subdirectory within the local
 [/tree?ci=trunk&name=compat | compat] directory (e.g.
-"<b>compat/openssl-1.0.2d</b>"), then make sure that some recent
+"<b>compat/openssl-1.0.2o</b>"), then make sure that some recent
 <a href="http://www.perl.org/">Perl</a> binaries are installed locally,
 and finally run one of the following commands:
 <blockquote><pre>

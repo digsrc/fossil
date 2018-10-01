@@ -23,8 +23,8 @@
 #include <sys/types.h>
 
 /*
-** The input is guaranteed to be a 40-character well-formed UUID.
-** Find its rid.
+** The input is guaranteed to be a 40- or 64-character well-formed
+** artifact hash.  Find its rid.
 */
 int fast_uuid_to_rid(const char *zUuid){
   static Stmt q;
@@ -53,13 +53,13 @@ int fast_uuid_to_rid(const char *zUuid){
 */
 int uuid_to_rid(const char *zUuid, int phantomize){
   int rid, sz;
-  char z[UUID_SIZE+1];
+  char z[HNAME_MAX+1];
 
   sz = strlen(zUuid);
-  if( sz!=UUID_SIZE || !validate16(zUuid, sz) ){
-    return 0;
+  if( !hname_validate(zUuid, sz) ){
+    return 0;  /* Not a valid hash */
   }
-  memcpy(z, zUuid, UUID_SIZE+1);
+  memcpy(z, zUuid, sz+1);
   canonical16(z, sz);
   rid = fast_uuid_to_rid(z);
   if( rid==0 && phantomize ){
@@ -132,7 +132,7 @@ int load_vfile_from_rid(int vid){
 ** combination of the following bits:
 */
 #define CKSIG_ENOTFILE  0x001   /* non-file FS objects throw an error */
-#define CKSIG_SHA1      0x002   /* Verify file content using sha1sum */
+#define CKSIG_HASH      0x002   /* Verify file content using hashing */
 #define CKSIG_SETMTIME  0x004   /* Set mtime to last check-out time */
 
 #endif /* INTERFACE */
@@ -161,8 +161,8 @@ int load_vfile_from_rid(int vid){
 ** changed without having to look at the mtime or on-disk content.
 **
 ** The mtime of the file is only a factor if the mtime-changes setting
-** is false and the useSha1sum flag is false.  If the mtime-changes
-** setting is true (or undefined - it defaults to true) or if useSha1sum
+** is false and the CKSIG_HASH flag is false.  If the mtime-changes
+** setting is true (or undefined - it defaults to true) or if CKSIG_HASH
 ** is true, then we do not trust the mtime and will examine the on-disk
 ** content to determine if a file really is the same.
 **
@@ -173,8 +173,7 @@ int load_vfile_from_rid(int vid){
 void vfile_check_signature(int vid, unsigned int cksigFlags){
   int nErr = 0;
   Stmt q;
-  Blob fileCksum, origCksum;
-  int useMtime = (cksigFlags & CKSIG_SHA1)==0
+  int useMtime = (cksigFlags & CKSIG_HASH)==0
                     && db_get_boolean("mtime-changes", 1);
 
   db_begin_transaction();
@@ -189,8 +188,10 @@ void vfile_check_signature(int vid, unsigned int cksigFlags){
     const char *zName;
     int chnged = 0;
     int oldChnged;
+#ifndef _WIN32
     int origPerm;
     int currentPerm;
+#endif
     i64 oldMtime;
     i64 currentMtime;
     i64 origSize;
@@ -203,14 +204,16 @@ void vfile_check_signature(int vid, unsigned int cksigFlags){
     oldChnged = chnged = db_column_int(&q, 4);
     oldMtime = db_column_int64(&q, 7);
     origSize = db_column_int64(&q, 6);
-    currentSize = file_wd_size(zName);
-    currentMtime = file_wd_mtime(0);
+    currentSize = file_size(zName, RepoFILE);
+    currentMtime = file_mtime(0, 0);
+#ifndef _WIN32
     origPerm = db_column_int(&q, 8);
-    currentPerm = file_wd_perm(zName);
+    currentPerm = file_perm(zName, RepoFILE);
+#endif
     if( chnged==0 && (isDeleted || rid==0) ){
       /* "fossil rm" or "fossil add" always change the file */
       chnged = 1;
-    }else if( !file_wd_isfile_or_link(0) && currentSize>=0 ){
+    }else if( !file_isfile_or_link(0) && currentSize>=0 ){
       if( cksigFlags & CKSIG_ENOTFILE ){
         fossil_warning("not an ordinary file: %s", zName);
         nErr++;
@@ -220,57 +223,49 @@ void vfile_check_signature(int vid, unsigned int cksigFlags){
     if( origSize!=currentSize ){
       if( chnged!=1 ){
         /* A file size change is definitive - the file has changed.  No
-        ** need to check the mtime or sha1sum */
+        ** need to check the mtime or hash */
         chnged = 1;
       }
     }else if( chnged==1 && rid!=0 && !isDeleted ){
       /* File is believed to have changed but it is the same size.
       ** Double check that it really has changed by looking at content. */
+      const char *zUuid = db_column_text(&q, 5);
+      int nUuid = db_column_bytes(&q, 5);
       assert( origSize==currentSize );
-      db_ephemeral_blob(&q, 5, &origCksum);
-      if( sha1sum_file(zName, &fileCksum) ){
-        blob_zero(&fileCksum);
-      }
-      if( blob_compare(&fileCksum, &origCksum)==0 ) chnged = 0;
-      blob_reset(&origCksum);
-      blob_reset(&fileCksum);
+      if( hname_verify_file_hash(zName, zUuid, nUuid) ) chnged = 0;
     }else if( (chnged==0 || chnged==2 || chnged==4)
            && (useMtime==0 || currentMtime!=oldMtime) ){
       /* For files that were formerly believed to be unchanged or that were
       ** changed by merging, if their mtime changes, or unconditionally
-      ** if --sha1sum is used, check to see if they have been edited by
-      ** looking at their SHA1 sum */
+      ** if --hash is used, check to see if they have been edited by
+      ** looking at their artifact hashes */
+      const char *zUuid = db_column_text(&q, 5);
+      int nUuid = db_column_bytes(&q, 5);
       assert( origSize==currentSize );
-      db_ephemeral_blob(&q, 5, &origCksum);
-      if( sha1sum_file(zName, &fileCksum) ){
-        blob_zero(&fileCksum);
-      }
-      if( blob_compare(&fileCksum, &origCksum) ){
-        chnged = 1;
-      }
-      blob_reset(&origCksum);
-      blob_reset(&fileCksum);
+      if( !hname_verify_file_hash(zName, zUuid, nUuid) ) chnged = 1;
     }
     if( (cksigFlags & CKSIG_SETMTIME) && (chnged==0 || chnged==2 || chnged==4) ){
       i64 desiredMtime;
       if( mtime_of_manifest_file(vid,rid,&desiredMtime)==0 ){
         if( currentMtime!=desiredMtime ){
           file_set_mtime(zName, desiredMtime);
-          currentMtime = file_wd_mtime(zName);
+          currentMtime = file_mtime(zName, RepoFILE);
         }
       }
     }
 #ifndef _WIN32
-    if( chnged==0 || chnged==6 || chnged==7 || chnged==8 || chnged==9 ){
-      if( origPerm == currentPerm ){
+    if( origPerm!=PERM_LNK && currentPerm==PERM_LNK ){
+       /* Changing to a symlink takes priority over all other change types. */
+       chnged = 7;
+    }else if( chnged==0 || chnged==6 || chnged==7 || chnged==8 || chnged==9 ){
+       /* Confirm metadata change types. */
+      if( origPerm==currentPerm ){
         chnged = 0;
-      }else if( currentPerm == PERM_EXE ){
+      }else if( currentPerm==PERM_EXE ){
         chnged = 6;
-      }else if( currentPerm == PERM_LNK ){
-        chnged = 7;
-      }else if( origPerm == PERM_EXE ){
+      }else if( origPerm==PERM_EXE ){
         chnged = 8;
-      }else if( origPerm == PERM_LNK ){
+      }else if( origPerm==PERM_LNK ){
         chnged = 9;
       }
     }
@@ -323,13 +318,13 @@ void vfile_to_disk(
     content_get(rid, &content);
     if( file_is_the_same(&content, zName) ){
       blob_reset(&content);
-      if( file_wd_setexe(zName, isExe) ){
+      if( file_setexe(zName, isExe) ){
         db_multi_exec("UPDATE vfile SET mtime=%lld WHERE id=%d",
-                      file_wd_mtime(zName), id);
+                      file_mtime(zName, RepoFILE), id);
       }
       continue;
     }
-    if( promptFlag && file_wd_size(zName)>=0 ){
+    if( promptFlag && file_size(zName, RepoFILE)>=0 ){
       Blob ans;
       char *zMsg;
       char cReply;
@@ -346,11 +341,11 @@ void vfile_to_disk(
       }
     }
     if( verbose ) fossil_print("%s\n", &zName[nRepos]);
-    if( file_wd_isdir(zName) == 1 ){
+    if( file_isdir(zName, RepoFILE)==1 ){
       /*TODO(dchest): remove directories? */
-      fossil_fatal("%s is directory, cannot overwrite\n", zName);
+      fossil_fatal("%s is directory, cannot overwrite", zName);
     }
-    if( file_wd_size(zName)>=0 && (isLink || file_wd_islink(0)) ){
+    if( file_size(zName, RepoFILE)>=0 && (isLink || file_islink(0)) ){
       file_delete(zName);
     }
     if( isLink ){
@@ -358,10 +353,10 @@ void vfile_to_disk(
     }else{
       blob_write_to_file(&content, zName);
     }
-    file_wd_setexe(zName, isExe);
+    file_setexe(zName, isExe);
     blob_reset(&content);
     db_multi_exec("UPDATE vfile SET mtime=%lld WHERE id=%d",
-                  file_wd_mtime(zName), id);
+                  file_mtime(zName, RepoFILE), id);
   }
   db_finalize(&q);
 }
@@ -394,11 +389,11 @@ int vfile_top_of_checkout(const char *zPath){
   int fileFound = 0;
 
   zFile = mprintf("%s/_FOSSIL_", zPath);
-  fileFound = file_size(zFile)>=1024;
+  fileFound = file_size(zFile, ExtFILE)>=1024;
   fossil_free(zFile);
   if( !fileFound ){
     zFile = mprintf("%s/.fslckout", zPath);
-    fileFound = file_size(zFile)>=1024;
+    fileFound = file_size(zFile, ExtFILE)>=1024;
     fossil_free(zFile);
   }
 
@@ -409,7 +404,7 @@ int vfile_top_of_checkout(const char *zPath){
   */
   if( !fileFound ){
     zFile = mprintf("%s/.fos", zPath);
-    fileFound = file_size(zFile)>=1024;
+    fileFound = file_size(zFile, ExtFILE)>=1024;
     fossil_free(zFile);
   }
   return fileFound;
@@ -433,7 +428,7 @@ static int is_temporary_file(const char *zName){
       return 1;
     }
     if( zName[0]!='-' ) continue;
-    for(i=0; i<sizeof(azTemp)/sizeof(azTemp[0]); i++){
+    for(i=0; i<count(azTemp); i++){
       n = (int)strlen(azTemp[i]);
       if( memcmp(azTemp[i], zName+1, n) ) continue;
       if( zName[n+1]==0 ) return 1;
@@ -453,6 +448,8 @@ static int is_temporary_file(const char *zName){
 #define SCAN_ALL    0x001    /* Includes files that begin with "." */
 #define SCAN_TEMP   0x002    /* Only Fossil-generated files like *-baseline */
 #define SCAN_NESTED 0x004    /* Scan for empty dirs in nested checkouts */
+#define SCAN_MTIME  0x008    /* Populate mtime column */
+#define SCAN_SIZE   0x010    /* Populate size column */
 #endif /* INTERFACE */
 
 /*
@@ -496,14 +493,19 @@ void vfile_scan(
 
   if( depth==0 ){
     db_prepare(&ins,
-       "INSERT OR IGNORE INTO sfile(x) SELECT :file"
-       "  WHERE NOT EXISTS(SELECT 1 FROM vfile WHERE"
-       " pathname=:file %s)", filename_collation()
+      "INSERT OR IGNORE INTO sfile(pathname%s%s) SELECT :file%s%s"
+      "  WHERE NOT EXISTS(SELECT 1 FROM vfile WHERE"
+      " pathname=:file %s)",
+      scanFlags & SCAN_MTIME ? ", mtime"  : "",
+      scanFlags & SCAN_SIZE  ? ", size"   : "",
+      scanFlags & SCAN_MTIME ? ", :mtime" : "",
+      scanFlags & SCAN_SIZE  ? ", :size"  : "",
+      filename_collation()
     );
   }
   depth++;
 
-  zNative = fossil_utf8_to_filename(blob_str(pPath));
+  zNative = fossil_utf8_to_path(blob_str(pPath), 1);
   d = opendir(zNative);
   if( d ){
     while( (pEntry=readdir(d))!=0 ){
@@ -514,7 +516,7 @@ void vfile_scan(
         if( pEntry->d_name[1]==0 ) continue;
         if( pEntry->d_name[1]=='.' && pEntry->d_name[2]==0 ) continue;
       }
-      zUtf8 = fossil_filename_to_utf8(pEntry->d_name);
+      zUtf8 = fossil_path_to_utf8(pEntry->d_name);
       blob_appendf(pPath, "/%s", zUtf8);
       zPath = blob_str(pPath);
       if( glob_match(pIgnore1, &zPath[nPrefix+1]) ||
@@ -522,31 +524,37 @@ void vfile_scan(
         /* do nothing */
 #ifdef _DIRENT_HAVE_D_TYPE
       }else if( (pEntry->d_type==DT_UNKNOWN || pEntry->d_type==DT_LNK)
-          ? (file_wd_isdir(zPath)==1) : (pEntry->d_type==DT_DIR) ){
+          ? (file_isdir(zPath, RepoFILE)==1) : (pEntry->d_type==DT_DIR) ){
 #else
-      }else if( file_wd_isdir(zPath)==1 ){
+      }else if( file_isdir(zPath, RepoFILE)==1 ){
 #endif
         if( !vfile_top_of_checkout(zPath) ){
           vfile_scan(pPath, nPrefix, scanFlags, pIgnore1, pIgnore2);
         }
 #ifdef _DIRENT_HAVE_D_TYPE
       }else if( (pEntry->d_type==DT_UNKNOWN || pEntry->d_type==DT_LNK)
-          ? (file_wd_isfile_or_link(zPath)) : (pEntry->d_type==DT_REG) ){
+          ? (file_isfile_or_link(zPath)) : (pEntry->d_type==DT_REG) ){
 #else
-      }else if( file_wd_isfile_or_link(zPath) ){
+      }else if( file_isfile_or_link(zPath) ){
 #endif
         if( (scanFlags & SCAN_TEMP)==0 || is_temporary_file(zUtf8) ){
           db_bind_text(&ins, ":file", &zPath[nPrefix+1]);
+          if( scanFlags & SCAN_MTIME ){
+            db_bind_int(&ins, ":mtime", file_mtime(zPath, RepoFILE));
+          }
+          if( scanFlags & SCAN_SIZE ){
+            db_bind_int(&ins, ":size", file_size(zPath, RepoFILE));
+          }
           db_step(&ins);
           db_reset(&ins);
         }
       }
-      fossil_filename_free(zUtf8);
+      fossil_path_free(zUtf8);
       blob_resize(pPath, origSize);
     }
     closedir(d);
   }
-  fossil_filename_free(zNative);
+  fossil_path_free(zNative);
 
   depth--;
   if( depth==0 ){
@@ -615,7 +623,7 @@ int vfile_dir_scan(
   }
   depth++;
 
-  zNative = fossil_utf8_to_filename(blob_str(pPath));
+  zNative = fossil_utf8_to_path(blob_str(pPath), 1);
   d = opendir(zNative);
   if( d ){
     while( (pEntry=readdir(d))!=0 ){
@@ -628,7 +636,7 @@ int vfile_dir_scan(
         if( pEntry->d_name[1]=='.' && pEntry->d_name[2]==0 ) continue;
       }
       zOrigPath = mprintf("%s", blob_str(pPath));
-      zUtf8 = fossil_filename_to_utf8(pEntry->d_name);
+      zUtf8 = fossil_path_to_utf8(pEntry->d_name);
       blob_appendf(pPath, "/%s", zUtf8);
       zPath = blob_str(pPath);
       if( glob_match(pIgnore1, &zPath[nPrefix+1]) ||
@@ -636,9 +644,9 @@ int vfile_dir_scan(
         /* do nothing */
 #ifdef _DIRENT_HAVE_D_TYPE
       }else if( (pEntry->d_type==DT_UNKNOWN || pEntry->d_type==DT_LNK)
-          ? (file_wd_isdir(zPath)==1) : (pEntry->d_type==DT_DIR) ){
+          ? (file_isdir(zPath, RepoFILE)==1) : (pEntry->d_type==DT_DIR) ){
 #else
-      }else if( file_wd_isdir(zPath)==1 ){
+      }else if( file_isdir(zPath, RepoFILE)==1 ){
 #endif
         if( (scanFlags & SCAN_NESTED) || !vfile_top_of_checkout(zPath) ){
           char *zSavePath = mprintf("%s", zPath);
@@ -653,22 +661,22 @@ int vfile_dir_scan(
         }
 #ifdef _DIRENT_HAVE_D_TYPE
       }else if( (pEntry->d_type==DT_UNKNOWN || pEntry->d_type==DT_LNK)
-          ? (file_wd_isfile_or_link(zPath)) : (pEntry->d_type==DT_REG) ){
+          ? (file_isfile_or_link(zPath)) : (pEntry->d_type==DT_REG) ){
 #else
-      }else if( file_wd_isfile_or_link(zPath) ){
+      }else if( file_isfile_or_link(zPath) ){
 #endif
         db_bind_text(&upd, ":file", zOrigPath);
         db_step(&upd);
         db_reset(&upd);
         result++; /* found 1 normal file */
       }
-      fossil_filename_free(zUtf8);
+      fossil_path_free(zUtf8);
       blob_resize(pPath, origSize);
       fossil_free(zOrigPath);
     }
     closedir(d);
   }
-  fossil_filename_free(zNative);
+  fossil_path_free(zNative);
 
   depth--;
   if( depth==0 ){
@@ -720,7 +728,7 @@ void vfile_aggregate_checksum_disk(int vid, Blob *pOut){
 
     if( isSelected ){
       md5sum_step_text(zName, -1);
-      if( file_wd_islink(zFullpath) ){
+      if( file_islink(zFullpath) ){
         /* Instead of file content, use link destination path */
         Blob pathBuf;
 
@@ -780,7 +788,7 @@ char *write_blob_to_temp_file(Blob *pBlob){
     sqlite3_free(zOut);
     sqlite3_randomness(8, &r);
     zOut = sqlite3_mprintf("file-%08llx", r);
-  }while( file_size(zOut)>=0 );
+  }while( file_size(zOut, ExtFILE)>=0 );
   blob_write_to_file(pBlob, zOut);
   return zOut;
 }
@@ -790,7 +798,7 @@ char *write_blob_to_temp_file(Blob *pBlob){
 ** the working check-out on disk.  Report any errors.
 */
 void vfile_compare_repository_to_disk(int vid){
-  int rc;
+  sqlite3_int64 rc;
   Stmt q;
   Blob disk, repo;
   char *zOut;
@@ -809,11 +817,7 @@ void vfile_compare_repository_to_disk(int vid){
     int rid = db_column_int(&q, 2);
 
     blob_zero(&disk);
-    if( file_wd_islink(zFullpath) ){
-      rc = blob_read_link(&disk, zFullpath);
-    }else{
-      rc = blob_read_from_file(&disk, zFullpath);
-    }
+    rc = blob_read_from_file(&disk, zFullpath, RepoFILE);
     if( rc<0 ){
       fossil_print("ERROR: cannot read file [%s]\n", zFullpath);
       blob_reset(&disk);
@@ -916,7 +920,7 @@ void vfile_aggregate_checksum_manifest(int vid, Blob *pOut, Blob *pManOut){
   db_must_be_within_tree();
   pManifest = manifest_get(vid, CFTYPE_MANIFEST, &err);
   if( pManifest==0 ){
-    fossil_fatal("manifest file (%d) is malformed:\n%s\n",
+    fossil_fatal("manifest file (%d) is malformed:\n%s",
                  vid, blob_str(&err));
   }
   manifest_file_rewind(pManifest);

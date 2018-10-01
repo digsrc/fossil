@@ -82,24 +82,28 @@ void delete_private_content(void){
 /*
 ** COMMAND: clone
 **
-** Usage: %fossil clone ?OPTIONS? URL FILENAME
+** Usage: %fossil clone ?OPTIONS? URI FILENAME
 **
-** Make a clone of a repository specified by URL in the local
+** Make a clone of a repository specified by URI in the local
 ** file named FILENAME.
 **
-** URL must be in one of the following form: ([...] mean optional)
+** URI may be one of the following form: ([...] mean optional)
 **   HTTP/HTTPS protocol:
 **     http[s]://[userid[:password]@]host[:port][/path]
 **
 **   SSH protocol:
-**     ssh://[userid[:password]@]host[:port]/path/to/repo.fossil\\
+**     ssh://[userid@]host[:port]/path/to/repo.fossil\\
 **     [?fossil=path/to/fossil.exe]
 **
 **   Filesystem:
 **     [file://]path/to/repo.fossil
 **
-**   Note: For ssh and filesystem, path must have an extra leading
+** Note 1: For ssh and filesystem, path must have an extra leading
 **         '/' to use an absolute path.
+**
+** Note 2: Use %HH escapes for special characters in the userid and
+**         password.  For example "%40" in place of "@", "%2f" in place
+**         of "/", and "%3a" in place of ":".
 **
 ** By default, your current login name is used to create the default
 ** admin user. This can be overridden using the -A|--admin-user
@@ -107,12 +111,13 @@ void delete_private_content(void){
 **
 ** Options:
 **    --admin-user|-A USERNAME   Make USERNAME the administrator
-**    --once                     Don't save url.
+**    --once                     Don't remember the URI.
 **    --private                  Also clone private branches
-**    --ssl-identity=filename    Use the SSL identity if requested by the server
-**    --ssh-command|-c 'command' Use this SSH command
-**    --httpauth|-B 'user:pass'  Add HTTP Basic Authorization to requests
-**    --verbose                  Show more statistics in output
+**    --ssl-identity FILENAME    Use the SSL identity if requested by the server
+**    --ssh-command|-c SSH       Use SSH as the "ssh" command
+**    --httpauth|-B USER:PASS    Add HTTP Basic Authorization to requests
+**    -u|--unversioned           Also sync unversioned content
+**    -v|--verbose               Show more statistics in output
 **
 ** See also: init
 */
@@ -127,7 +132,8 @@ void clone_cmd(void){
   /* Also clone private branches */
   if( find_option("private",0,0)!=0 ) syncFlags |= SYNC_PRIVATE;
   if( find_option("once",0,0)!=0) urlFlags &= ~URL_REMEMBER;
-  if( find_option("verbose",0,0)!=0) syncFlags |= SYNC_VERBOSE;
+  if( find_option("verbose","v",0)!=0) syncFlags |= SYNC_VERBOSE;
+  if( find_option("unversioned","u",0)!=0 ) syncFlags |= SYNC_UNVERSIONED;
   zHttpAuth = find_option("httpauth","B",1);
   zDefaultUser = find_option("admin-user","A",1);
   clone_ssh_find_options();
@@ -139,8 +145,8 @@ void clone_cmd(void){
   if( g.argc < 4 ){
     usage("?OPTIONS? FILE-OR-URL NEW-REPOSITORY");
   }
-  db_open_config(0);
-  if( -1 != file_size(g.argv[3]) ){
+  db_open_config(0, 0);
+  if( -1 != file_size(g.argv[3], ExtFILE) ){
     fossil_fatal("file already exists: %s", g.argv[3]);
   }
 
@@ -162,8 +168,10 @@ void clone_cmd(void){
     }
     fossil_print("Repository cloned into %s\n", g.argv[3]);
   }else{
+    db_close_config();
     db_create_repository(g.argv[3]);
     db_open_repository(g.argv[3]);
+    db_open_config(0,0);
     db_begin_transaction();
     db_record_repository_filename(g.argv[3]);
     db_initial_setup(0, 0, zDefaultUser);
@@ -171,6 +179,7 @@ void clone_cmd(void){
     db_set("content-schema", CONTENT_SCHEMA, 0);
     db_set("aux-schema", AUX_SCHEMA_MAX, 0);
     db_set("rebuilt", get_version(), 0);
+    db_unset("hash-policy", 0);
     remember_or_get_http_auth(zHttpAuth, urlFlags & URL_REMEMBER, g.argv[2]);
     url_remember();
     if( g.zSSLIdentity!=0 ){
@@ -287,4 +296,51 @@ void clone_ssh_db_set_options(void){
   if( g.zSshCmd && g.zSshCmd[0] ){
     db_set("ssh-command", g.zSshCmd, 0);
   }
+}
+
+/*
+** WEBPAGE: download
+**
+** Provide a simple page that enables newbies to download the latest tarball or
+** ZIP archive, and provides instructions on how to clone.
+*/
+void download_page(void){
+  login_check_credentials();
+  style_header("Download Page");
+  if( !g.perm.Zip ){
+    @ <p>Bummer.  You do not have permission to download.
+    if( g.zLogin==0 || g.zLogin[0]==0 ){
+      @ Maybe it would work better if you
+      @ <a href="../login">logged in</a>.
+    }else{
+      @ Contact the site administrator and ask them to give
+      @ you "Download Zip" privileges.
+    }
+  }else{
+    const char *zDLTag = db_get("download-tag","trunk");
+    const char *zNm = db_get("short-project-name","download");
+    char *zUrl = href("%R/zip/%t/%t.zip", zDLTag, zNm);
+    @ <p>ZIP Archive: %z(zUrl)%h(zNm).zip</a>
+    zUrl = href("%R/tarball/%t/%t.tar.gz", zDLTag, zNm);
+    @ <p>Tarball: %z(zUrl)%h(zNm).tar.gz</a>
+    zUrl = href("%R/sqlar/%t/%t.sqlar", zDLTag, zNm);
+    @ <p>SQLite Archive: %z(zUrl)%h(zNm).sqlar</a>
+  }
+  if( !g.perm.Clone ){
+    @ <p>You are not authorized to clone this repository.
+    if( g.zLogin==0 || g.zLogin[0]==0 ){
+      @ Maybe you would be able to clone if you
+      @ <a href="../login">logged in</a>.
+    }else{
+      @ Contact the site administrator and ask them to give
+      @ you "Clone" privileges in order to clone.
+    }
+  }else{
+    const char *zNm = db_get("short-project-name","clone");
+    @ <p>Clone the repository using this command:
+    @ <blockquote><pre>
+    @ fossil  clone  %s(g.zBaseURL)  %h(zNm).fossil
+    @ </pre></blockquote>
+  }
+  style_footer();
 }

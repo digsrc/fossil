@@ -56,15 +56,11 @@ static void undo_one(const char *zPathname, int redoFlag){
     Blob new;
     zFullname = mprintf("%s/%s", g.zLocalRoot, zPathname);
     old_link = db_column_int(&q, 3);
-    new_exists = file_wd_size(zFullname)>=0;
-    new_link = file_wd_islink(0);
+    new_exists = file_size(zFullname, RepoFILE)>=0;
+    new_link = file_islink(0);
     if( new_exists ){
-      if( new_link ){
-        blob_read_link(&current, zFullname);
-      }else{
-        blob_read_from_file(&current, zFullname);
-      }
-      new_exe = file_wd_isexe(0);
+      blob_read_from_file(&current, zFullname, RepoFILE);
+      new_exe = file_isexe(0,0);
     }else{
       blob_zero(&current);
       new_exe = 0;
@@ -89,7 +85,7 @@ static void undo_one(const char *zPathname, int redoFlag){
       }else{
         blob_write_to_file(&new, zFullname);
       }
-      file_wd_setexe(zFullname, old_exe);
+      file_setexe(zFullname, old_exe);
     }else{
       fossil_print("DELETE %s\n", zPathname);
       file_delete(zFullname);
@@ -227,9 +223,8 @@ void undo_capture_command_line(void){
 */
 void undo_begin(void){
   int cid;
-  const char *zDb = db_name("localdb");
   static const char zSql[] =
-    @ CREATE TABLE "%w".undo(
+    @ CREATE TABLE localdb.undo(
     @   pathname TEXT UNIQUE,             -- Name of the file
     @   redoflag BOOLEAN,                 -- 0 for undoable.  1 for redoable
     @   existsflag BOOLEAN,               -- True if the file exists
@@ -237,12 +232,12 @@ void undo_begin(void){
     @   isLink BOOLEAN,                   -- True if the file is symlink
     @   content BLOB                      -- Saved content
     @ );
-    @ CREATE TABLE "%w".undo_vfile AS SELECT * FROM vfile;
-    @ CREATE TABLE "%w".undo_vmerge AS SELECT * FROM vmerge;
+    @ CREATE TABLE localdb.undo_vfile AS SELECT * FROM vfile;
+    @ CREATE TABLE localdb.undo_vmerge AS SELECT * FROM vmerge;
   ;
   if( undoDisable ) return;
   undo_reset();
-  db_multi_exec(zSql/*works-like:"%w,%w,%w"*/, zDb, zDb, zDb);
+  db_multi_exec(zSql/*works-like:""*/);
   cid = db_lget_int("checkout", 0);
   db_lset_int("undo_checkout", cid);
   db_lset_int("undo_available", 1);
@@ -320,24 +315,20 @@ int undo_maybe_save(const char *zPathname, i64 limit){
   if( undoDisable ) return UNDO_DISABLED;
   if( !undoActive ) return UNDO_INACTIVE;
   zFullname = mprintf("%s%s", g.zLocalRoot, zPathname);
-  size = file_wd_size(zFullname);
+  size = file_size(zFullname, RepoFILE);
   if( limit<0 || size<=limit ){
     int existsFlag = (size>=0);
-    int isLink = file_wd_islink(zFullname);
+    int isLink = file_islink(zFullname);
     Stmt q;
     Blob content;
     db_prepare(&q,
       "INSERT OR IGNORE INTO"
       "   undo(pathname,redoflag,existsflag,isExe,isLink,content)"
       " VALUES(%Q,0,%d,%d,%d,:c)",
-      zPathname, existsFlag, file_wd_isexe(zFullname), isLink
+      zPathname, existsFlag, file_isexe(zFullname,RepoFILE), isLink
     );
     if( existsFlag ){
-      if( isLink ){
-        blob_read_link(&content, zFullname);
-      }else{
-        blob_read_from_file(&content, zFullname);
-      }
+      blob_read_from_file(&content, zFullname, RepoFILE);
       db_bind_blob(&q, ":c", &content);
     }
     db_step(&q);
@@ -379,20 +370,19 @@ const char *undo_save_message(int rc){
 ** Make the current state of stashid undoable.
 */
 void undo_save_stash(int stashid){
-  const char *zDb = db_name("localdb");
   db_multi_exec(
-    "CREATE TABLE IF NOT EXISTS \"%w\".undo_stash"
+    "CREATE TABLE IF NOT EXISTS localdb.undo_stash"
     "  AS SELECT * FROM stash WHERE 0;"
     "INSERT INTO undo_stash"
     " SELECT * FROM stash WHERE stashid=%d;",
-    zDb, stashid
+    stashid
   );
   db_multi_exec(
-    "CREATE TABLE IF NOT EXISTS \"%w\".undo_stashfile"
+    "CREATE TABLE IF NOT EXISTS localdb.undo_stashfile"
     "  AS SELECT * FROM stashfile WHERE 0;"
     "INSERT INTO undo_stashfile"
     " SELECT * FROM stashfile WHERE stashid=%d;",
-    zDb, stashid
+    stashid
   );
 }
 
@@ -481,10 +471,11 @@ void undo_cmd(void){
     }else{
       Stmt q;
       int nChng = 0;
+      const char *zArticle = undo_available==1 ? "An" : "A";
       zCmd = undo_available==1 ? "undo" : "redo";
-      fossil_print("A %s is available for the following command:\n\n"
+      fossil_print("%s %s is available for the following command:\n\n"
                    "   %s %s\n\n",
-                   zCmd, g.argv[0], db_lget("undo_cmdline", "???"));
+                   zArticle, zCmd, g.argv[0], db_lget("undo_cmdline", "???"));
       db_prepare(&q,
         "SELECT existsflag, pathname FROM undo ORDER BY pathname"
       );

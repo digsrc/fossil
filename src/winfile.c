@@ -31,10 +31,11 @@
 
 /*
 ** Fill stat buf with information received from stat() or lstat().
-** lstat() is called on Unix if isWd is TRUE and allow-symlinks setting is on.
-**
+** lstat() is called on Unix if eFType is RepoFile and the allow-symlinks
+** setting is on.  But as windows does not support symbolic links, the
+** eFType parameter is ignored here.
 */
-int win32_stat(const wchar_t *zFilename, struct fossilStat *buf, int isWd){
+int win32_stat(const wchar_t *zFilename, struct fossilStat *buf, int eFType){
   WIN32_FILE_ATTRIBUTE_DATA attr;
   int rc = GetFileAttributesExW(zFilename, GetFileExInfoStandard, &attr);
   if( rc ){
@@ -285,10 +286,10 @@ void win32_getcwd(char *zBuf, int nBuf){
   if( GetCurrentDirectoryW(nBuf, zWide)==0 ){
     fossil_fatal("cannot find current working directory.");
   }
-  zUtf8 = fossil_filename_to_utf8(zWide);
+  zUtf8 = fossil_path_to_utf8(zWide);
   fossil_free(zWide);
   for(i=0; zUtf8[i]; i++) if( zUtf8[i]=='\\' ) zUtf8[i] = '/';
   strncpy(zBuf, zUtf8, nBuf);
-  fossil_filename_free(zUtf8);
+  fossil_path_free(zUtf8);
 }
 #endif /* _WIN32  -- This code is for win32 only */

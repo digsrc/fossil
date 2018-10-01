@@ -19,6 +19,10 @@
 */
 #include "config.h"
 #include "util.h"
+#if defined(USE_MMAN_H)
+# include <sys/mman.h>
+# include <unistd.h>
+#endif
 
 /*
 ** For the fossil_timer_xxx() family of functions...
@@ -58,6 +62,80 @@ void *fossil_realloc(void *p, size_t n){
   if( p==0 ) fossil_panic("out of memory");
   return p;
 }
+void fossil_secure_zero(void *p, size_t n){
+  volatile unsigned char *vp = (volatile unsigned char *)p;
+  size_t i;
+
+  if( p==0 ) return;
+  assert( n>0 );
+  if( n==0 ) return;
+  for(i=0; i<n; i++){ vp[i] ^= 0xFF; }
+  for(i=0; i<n; i++){ vp[i] ^= vp[i]; }
+}
+void fossil_get_page_size(size_t *piPageSize){
+#if defined(_WIN32)
+  SYSTEM_INFO sysInfo;
+  memset(&sysInfo, 0, sizeof(SYSTEM_INFO));
+  GetSystemInfo(&sysInfo);
+  *piPageSize = (size_t)sysInfo.dwPageSize;
+#elif defined(USE_MMAN_H)
+  *piPageSize = (size_t)sysconf(_SC_PAGE_SIZE);
+#else
+  *piPageSize = 4096; /* FIXME: What for POSIX? */
+#endif
+}
+void *fossil_secure_alloc_page(size_t *pN){
+  void *p;
+  size_t pageSize = 0;
+
+  fossil_get_page_size(&pageSize);
+  assert( pageSize>0 );
+  assert( pageSize%2==0 );
+#if defined(_WIN32)
+  p = VirtualAlloc(NULL, pageSize, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE);
+  if( p==NULL ){
+    fossil_fatal("VirtualAlloc failed: %lu\n", GetLastError());
+  }
+  if( !VirtualLock(p, pageSize) ){
+    fossil_fatal("VirtualLock failed: %lu\n", GetLastError());
+  }
+#elif defined(USE_MMAN_H)
+  p = mmap(0, pageSize, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+  if( p==MAP_FAILED ){
+    fossil_fatal("mmap failed: %d\n", errno);
+  }
+  if( mlock(p, pageSize) ){
+    fossil_fatal("mlock failed: %d\n", errno);
+  }
+#else
+  p = fossil_malloc(pageSize);
+#endif
+  fossil_secure_zero(p, pageSize);
+  if( pN ) *pN = pageSize;
+  return p;
+}
+void fossil_secure_free_page(void *p, size_t n){
+  if( !p ) return;
+  assert( n>0 );
+  fossil_secure_zero(p, n);
+#if defined(_WIN32)
+  if( !VirtualUnlock(p, n) ){
+    fossil_fatal("VirtualUnlock failed: %lu\n", GetLastError());
+  }
+  if( !VirtualFree(p, 0, MEM_RELEASE) ){
+    fossil_fatal("VirtualFree failed: %lu\n", GetLastError());
+  }
+#elif defined(USE_MMAN_H)
+  if( munlock(p, n) ){
+    fossil_fatal("munlock failed: %d\n", errno);
+  }
+  if( munmap(p, n) ){
+    fossil_fatal("munmap failed: %d\n", errno);
+  }
+#else
+  fossil_free(p);
+#endif
+}
 
 /*
 ** This function implements a cross-platform "system()" interface.
@@ -89,7 +167,9 @@ int fossil_system(const char *zOrigCmd){
   assert( g.cgiOutput==0 );
 
   /* The regular system() call works to get a shell on unix */
+  fossil_limit_memory(0);
   rc = system(zOrigCmd);
+  fossil_limit_memory(1);
 #endif
   return rc;
 }
@@ -219,12 +299,6 @@ static struct FossilTimer {
 */
 int fossil_timer_start(){
   int i;
-  static char once = 0;
-  if(!once){
-    once = 1;
-    memset(&fossilTimerList, 0,
-           count(fossilTimerList));
-  }
   for( i = 0; i < FOSSIL_TIMER_COUNT; ++i ){
     struct FossilTimer * ft = &fossilTimerList[i];
     if(ft->id) continue;
@@ -325,13 +399,12 @@ int is_valid_fd(int fd){
 }
 
 /*
-** Returns TRUE if zSym is exactly UUID_SIZE bytes long and contains
-** only lower-case ASCII hexadecimal values.
+** Returns TRUE if zSym is exactly HNAME_LEN_SHA1 or HNAME_LEN_K256
+** bytes long and contains only lower-case ASCII hexadecimal values.
 */
 int fossil_is_uuid(const char *zSym){
-  return zSym
-    && (UUID_SIZE==strlen(zSym))
-    && validate16(zSym, UUID_SIZE);
+  int sz = zSym ? (int)strlen(zSym) : 0;
+  return (HNAME_LEN_SHA1==sz || HNAME_LEN_K256==sz) && validate16(zSym, sz);
 }
 
 /*
@@ -343,3 +416,108 @@ int fossil_all_whitespace(const char *z){
   while( fossil_isspace(z[0]) ){ z++; }
   return z[0]==0;
 }
+
+/*
+** Return the name of the users preferred text editor.  Return NULL if
+** not found.
+**
+** Search algorithm:
+** (1) The local "editor" setting
+** (2) The global "editor" setting
+** (3) The VISUAL environment variable
+** (4) The EDITOR environment variable
+** (5) (Windows only:) "notepad.exe"
+*/
+const char *fossil_text_editor(void){
+  const char *zEditor = db_get("editor", 0);
+  if( zEditor==0 ){
+    zEditor = fossil_getenv("VISUAL");
+  }
+  if( zEditor==0 ){
+    zEditor = fossil_getenv("EDITOR");
+  }
+#if defined(_WIN32) || defined(__CYGWIN__)
+  if( zEditor==0 ){
+    zEditor = mprintf("%s\\notepad.exe", fossil_getenv("SYSTEMROOT"));
+#if defined(__CYGWIN__)
+    zEditor = fossil_utf8_to_path(zEditor, 0);
+#endif
+  }
+#endif
+  return zEditor;
+}
+
+/*
+** Construct a temporary filename.
+**
+** The returned string is obtained from sqlite3_malloc() and must be
+** freed by the caller.
+*/
+char *fossil_temp_filename(void){
+  char *zTFile = 0;
+  sqlite3 *db;
+  if( g.db ){
+    db = g.db;
+  }else{
+    sqlite3_open("",&db);
+  }
+  sqlite3_file_control(db, 0, SQLITE_FCNTL_TEMPFILENAME, (void*)&zTFile);
+  if( g.db==0 ) sqlite3_close(db);
+  return zTFile;
+}
+
+/*
+** Turn memory limits for stack and heap on and off.  The argument
+** is true to turn memory limits on and false to turn them off.
+**
+** Memory limits should be enabled at startup, but then turned off
+** before starting subprocesses.
+*/
+void fossil_limit_memory(int onOff){
+#if defined(__unix__)
+  static sqlite3_int64 origHeap = 10000000000LL;  /* 10GB */
+  static sqlite3_int64 origStack =    8000000  ;  /*  8MB */
+  struct rlimit x;
+
+#if defined(RLIMIT_DATA)
+  getrlimit(RLIMIT_DATA, &x);
+  if( onOff ){
+    origHeap = x.rlim_cur;
+    if( sizeof(void*)<8 || sizeof(x.rlim_cur)<8 ){
+      x.rlim_cur =  1000000000  ;  /* 1GB on 32-bit systems */
+    }else{
+      x.rlim_cur = 10000000000LL;  /* 10GB on 64-bit systems */
+    }
+  }else{
+    x.rlim_cur = origHeap;
+  }
+  setrlimit(RLIMIT_DATA, &x);
+#endif /* defined(RLIMIT_DATA) */
+#if defined(RLIMIT_STACK)
+  getrlimit(RLIMIT_STACK, &x);
+  if( onOff ){
+    origStack = x.rlim_cur;
+    x.rlim_cur =  8000000;  /* 8MB */
+  }else{
+    x.rlim_cur = origStack;
+  }
+  setrlimit(RLIMIT_STACK, &x);
+#endif /* defined(RLIMIT_STACK) */
+#endif /* defined(__unix__) */
+}
+
+#if defined(HAVE_PLEDGE)
+/*
+** Interface to pledge() on OpenBSD 5.9 and later.
+**
+** On platforms that have pledge(), use this routine.
+** On all other platforms, this routine does not exist, but instead
+** a macro defined in config.h is used to provide a no-op.
+*/
+void fossil_pledge(const char *promises){
+  if( pledge(promises, 0) ){
+    fossil_fatal("pledge(\"%s\",NULL) fails with errno=%d",
+      promises, (int)errno);
+  }
+}
+#endif /* defined(HAVE_PLEDGE) */
